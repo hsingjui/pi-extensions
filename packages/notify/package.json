@@ -1,0 +1,27 @@
+{
+  "name": "pi-notify",
+  "version": "0.1.0",
+  "description": "macOS system notification when Pi finishes and waits for input",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "notify",
+    "macos"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-notify.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "catalog:",
+    "typescript": "^5.9.3"
+  }
+}

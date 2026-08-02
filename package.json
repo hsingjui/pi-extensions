@@ -1,0 +1,24 @@
+{
+  "name": "pi-extensions",
+  "version": "0.1.0",
+  "description": "Pi Coding Agent extensions monorepo - all extensions in one package, install with one command",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "scripts": {
+    "check": "pnpm -r check"
+  },
+  "pi": {
+    "extensions": [
+      "packages/cc-ui/extensions/pi-cc-ui.ts",
+      "packages/handoff/extensions/pi-handoff.ts",
+      "packages/mystatusline/extensions/pi-mystatusline.ts",
+      "packages/notify/extensions/pi-notify.ts",
+      "packages/oai-compact/extensions/pi-oai-compact.ts",
+      "packages/tool-opt/extensions/pi-tool-opt.ts"
+    ],
+    "themes": [
+      "packages/cc-ui/themes"
+    ]
+  }
+}

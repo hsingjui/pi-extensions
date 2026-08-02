@@ -1,0 +1,38 @@
+{
+  "name": "pi-cc-ui",
+  "version": "0.1.0",
+  "description": "Claude Code-like UI extension for Pi Coding Agent",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "tui",
+    "claude-code"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-cc-ui.ts"
+    ],
+    "themes": [
+      "./themes"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "catalog:",
+    "@earendil-works/pi-tui": "catalog:",
+    "@shikijs/cli": "^4.4.1",
+    "diff": "^9.0.0",
+    "shiki": "^4.4.1",
+    "typescript": "^7.0.2"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}

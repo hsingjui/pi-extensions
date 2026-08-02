@@ -1,0 +1,29 @@
+{
+  "name": "pi-mystatusline",
+  "version": "0.1.0",
+  "description": "Statusline extension scaffold for Pi Coding Agent",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "statusline",
+    "tui"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-mystatusline.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "catalog:",
+    "@earendil-works/pi-coding-agent": "catalog:",
+    "@earendil-works/pi-tui": "catalog:",
+    "typescript": "^5.9.3"
+  }
+}

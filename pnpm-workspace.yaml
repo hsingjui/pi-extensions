@@ -1,0 +1,13 @@
+packages:
+  - "packages/*"
+
+# 统一管理 pi 各包版本，升级只改这里
+catalog:
+  '@earendil-works/pi-agent-core': latest
+  '@earendil-works/pi-ai': latest
+  '@earendil-works/pi-coding-agent': latest
+  '@earendil-works/pi-tui': latest
+
+# photon-node (tool-opt) 依赖 koffi 需要构建脚本
+onlyBuiltDependencies:
+  - koffi

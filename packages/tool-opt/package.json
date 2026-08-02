@@ -1,0 +1,30 @@
+{
+  "name": "pi-tool-opt",
+  "version": "0.1.0",
+  "description": "Pi extension project scaffold",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-tool-opt.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@silvia-odwyer/photon-node": "^0.3.4",
+    "file-type": "^21.1.1"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "latest",
+    "typescript": "^5.9.3"
+  }
+}
