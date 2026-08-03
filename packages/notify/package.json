@@ -1,7 +1,7 @@
 {
   "name": "pi-notify",
   "version": "0.1.0",
-  "description": "macOS system notification when Pi finishes and waits for input",
+  "description": "System notification (WSL toast / macOS) when Pi finishes and waits for input",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@10",
@@ -10,6 +10,7 @@
     "pi",
     "pi-coding-agent",
     "notify",
+    "wsl",
     "macos"
   ],
   "pi": {

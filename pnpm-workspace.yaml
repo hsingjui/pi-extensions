@@ -1,6 +1,11 @@
 packages:
   - "packages/*"
 
+allowBuilds:
+  '@google/genai': true
+  koffi: true
+  protobufjs: true
+
 # 统一管理 pi 各包版本，升级只改这里
 catalog:
   '@earendil-works/pi-agent-core': latest

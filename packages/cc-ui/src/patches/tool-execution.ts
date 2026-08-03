@@ -1,4 +1,4 @@
-import { ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
+import { AssistantMessageComponent, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { formatCallStatus, getCompactToolCallRenderer, getCompactToolResultRenderer } from "../tool-display";
 import { getActiveTheme } from "../theme-runtime";
@@ -45,6 +45,19 @@ interface ToolExecutionPrototypeLike {
   __piCcUiOriginalCreateResultFallback?: () => unknown;
   __piCcUiOriginalSetExpanded?: (expanded: boolean) => void;
   __piCcUiOriginalRender?: (width: number) => string[];
+  __piCcUiParent?: { children?: unknown[] };
+}
+
+function followsVisibleAssistantText(instance: ToolExecutionPrototypeLike): boolean {
+  const siblings = instance.__piCcUiParent?.children;
+  const index = siblings?.indexOf(instance as never) ?? -1;
+  const previous = index > 0 ? siblings?.[index - 1] : undefined;
+  if (!(previous instanceof AssistantMessageComponent)) return false;
+
+  const content = (previous as unknown as { lastMessage?: { content?: unknown } }).lastMessage?.content;
+  return Array.isArray(content) && content.some((block) =>
+    isRecord(block) && block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,7 +247,7 @@ function getNeutralToolBackground(): ((text: string) => string) | undefined {
   }
 }
 
-const TOOL_EXECUTION_PATCH_VERSION = "bash-output-limit-v1";
+const TOOL_EXECUTION_PATCH_VERSION = "assistant-tool-spacing-v2";
 
 export function patchToolExecutionComponent(): void {
   const proto = ToolExecutionComponent.prototype as unknown as ToolExecutionPrototypeLike;
@@ -346,7 +359,8 @@ export function patchToolExecutionComponent(): void {
     const lines = originalRender?.call(this, width) ?? [];
     // self shell（如 edit）的核心 render 直接返回 selfRenderContainer 的行，
     // 绕过 Container.prototype.render 的边框装饰，这里补上。
-    return decorateToolRender(lines, width);
+    const decorated = decorateToolRender(lines, width);
+    return followsVisibleAssistantText(this) && decorated[0]?.trim() ? ["", ...decorated] : decorated;
   };
 
   proto.setExpanded = function setExpandedPatched(this: ToolExecutionPrototypeLike, expanded: boolean): void {
