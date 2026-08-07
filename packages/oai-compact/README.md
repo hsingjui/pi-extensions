@@ -36,7 +36,7 @@ pi -e ./src/index.ts
 兼容旧配置：未找到 `oaiCompact` 键时，回退到独立配置文件 `oai-compact.json`（按 `$PI_CODING_AGENT_DIR/oai-compact.json`、`~/.pi/oai-compact.json` 顺序查找）。
 
 - `model`：可选，compact 请求使用的模型。
-- `promptThreshold`：可选，agent 回复结束后检查当前上下文，达到阈值时提示是否执行 `/compact`。未配置且未命中 `modelPromptThresholds` 时默认为 `80`（80%）。
+- `promptThreshold`：可选，agent 回复结束后检查当前上下文，达到阈值时自动执行 `/compact`。未配置且未命中 `modelPromptThresholds` 时默认为 `80`（80%）。
   - 可以写数字，表示百分比：`"promptThreshold": 80`
   - 也可以写对象：`{ "percent": 80 }`、`{ "tokens": 180000 }`，或二者同时配置（任一达到即提示）
 - `modelPromptThresholds`：可选，按当前会话模型覆盖提示阈值；key 支持模型 `id`（如 `gpt-5.2`）或 `provider/id`（如 `openai/gpt-5.2`），也支持 `*` 通配符（如 `gpt-*`、`gpt5.*`、`openai/gpt-*`）。精确匹配优先于通配符；多个通配符命中时按配置文件中的顺序使用第一个。
@@ -48,11 +48,11 @@ native compact 只在当前会话模型是 `openai-responses` 时生效，并复
 
 compact 请求里的 `model` 优先使用 `oai-compact.json` 的 `model`；未配置时回退到当前会话模型的 `id`。
 
-`promptThreshold` / `modelPromptThresholds` 不限制 API 类型：只要 Pi 能给出当前上下文用量，就会在 `agent_end` 后提示；确认压缩后仍会走本插件的 native compact 逻辑（仅 `openai-responses`）或 Pi 默认 compact。
+`promptThreshold` / `modelPromptThresholds` 不限制 API 类型：只要 Pi 能给出当前上下文用量，就会在 `agent_end` 后自动压缩；压缩仍会走本插件的 native compact 逻辑（仅 `openai-responses`）或 Pi 默认 compact。
 
 ## 行为
 
-- 监听 `agent_end`，按 `promptThreshold` / `modelPromptThresholds` 检查上下文阈值并提示用户压缩
+- 监听 `agent_end`，按 `promptThreshold` / `modelPromptThresholds` 检查上下文阈值并自动压缩（有排队消息时延后到空闲后再压，不打断对话）
 - 只处理 `ctx.model.api === "openai-responses"` 的 native compact 会话
 - 监听 `session_before_compact`
 - 调用 OpenAI `responses/compact`，携带与 Pi 正常请求相同的 `prompt_cache_key`（sessionId）且 input 前缀包含 system prompt，命中正常请求已写入的 prompt cache

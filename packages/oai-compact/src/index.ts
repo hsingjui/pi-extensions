@@ -206,13 +206,6 @@ function formatPercent(percent: number): string {
 	return `${percent.toFixed(1).replace(/\.0$/, "")}%`;
 }
 
-function describePromptThreshold(threshold: CompactPromptThreshold): string {
-	const parts: string[] = [];
-	if (threshold.percent !== undefined) parts.push(formatPercent(threshold.percent));
-	if (threshold.tokens !== undefined) parts.push(`${formatTokenCount(threshold.tokens)} tokens`);
-	return parts.join(" 或 ");
-}
-
 function getPromptThresholdHit(input: {
 	threshold: CompactPromptThreshold;
 	usage: ReturnType<ExtensionContext["getContextUsage"]>;
@@ -232,24 +225,29 @@ function getPromptThresholdHit(input: {
 	return { reached: reasons.length > 0, reasons };
 }
 
-function schedulePromptedCompaction(ctx: ExtensionContext, usage: ReturnType<ExtensionContext["getContextUsage"]>) {
-	const maxAttempts = 40;
+// ponytail: 模块级防重入标志，避免多轮 agent_end 重复调度压缩
+let compactionScheduled = false;
+
+function schedulePromptedCompaction(ctx: ExtensionContext) {
+	if (compactionScheduled) {
+		return;
+	}
+	compactionScheduled = true;
+
+	const maxAttempts = 120;
 	let attempt = 0;
 
 	const runWhenIdle = () => {
 		attempt += 1;
-		if (!ctx.isIdle() && attempt < maxAttempts) {
-			setTimeout(runWhenIdle, 250);
+		if ((!ctx.isIdle() || ctx.hasPendingMessages()) && attempt < maxAttempts) {
+			setTimeout(runWhenIdle, 1000);
 			return;
 		}
 
-		if (!ctx.isIdle()) {
-			notify(ctx, "已确认压缩，但 agent 仍未空闲，请稍后手动运行 /compact。", "warning");
-			return;
-		}
+		compactionScheduled = false;
 
-		if (ctx.hasPendingMessages()) {
-			notify(ctx, "已确认压缩，但当前还有排队消息，请稍后手动运行 /compact。", "warning");
+		if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+			notify(ctx, "已达到压缩阈值，但 agent 持续忙碌，请稍后手动运行 /compact。", "warning");
 			return;
 		}
 
@@ -259,12 +257,16 @@ function schedulePromptedCompaction(ctx: ExtensionContext, usage: ReturnType<Ext
 				notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
 			},
 			onError: (error) => {
+				if (error.message.includes("Nothing to compact")) {
+					notify(ctx, "会话内容过少，暂无可压缩内容，继续对话后再试。", "info");
+					return;
+				}
 				notify(ctx, `压缩失败：${error.message}`, "error");
 			},
 		});
 	};
 
-	setTimeout(runWhenIdle, 0);
+	setTimeout(runWhenIdle, 1000);
 }
 
 async function handleAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
@@ -276,37 +278,18 @@ async function handleAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
 
 	const threshold = getModelPromptThreshold(configFile, ctx);
 
-	const usage = ctx.getContextUsage();
-	const hit = getPromptThresholdHit({ threshold, usage });
+	const hit = getPromptThresholdHit({ threshold, usage: ctx.getContextUsage() });
 
 	if (!hit.reached) {
 		return;
 	}
 
-	if (!ctx.hasUI) {
-		return;
-	}
+	const suffix = ctx.hasPendingMessages()
+		? "当前还有排队消息，将在空闲后自动压缩。"
+		: "开始自动压缩…";
+	notify(ctx, `上下文已达到压缩阈值（${hit.reasons.join("；")}），${suffix}`, "info");
 
-	if (ctx.hasPendingMessages()) {
-		notify(ctx, `上下文已达到压缩阈值（${hit.reasons.join("；")}），当前还有排队消息，建议稍后运行 /compact。`, "warning");
-		return;
-	}
-
-	const usageText = usage
-		? `${usage.tokens === null ? "未知" : formatTokenCount(usage.tokens)} / ${formatTokenCount(usage.contextWindow)} tokens${usage.percent === null ? "" : `（${formatPercent(usage.percent)}）`}`
-		: "未知";
-	const accepted = await ctx.ui.confirm(
-		"上下文压缩建议",
-		`当前上下文：${usageText}\n触发阈值：${describePromptThreshold(threshold)}\n原因：${hit.reasons.join("；")}\n\n是否现在执行 /compact？`,
-	);
-
-
-	if (!accepted) {
-		return;
-	}
-
-	notify(ctx, "已确认压缩，将在本轮完全结束后自动执行…", "info");
-	schedulePromptedCompaction(ctx, usage);
+	schedulePromptedCompaction(ctx);
 }
 
 async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
@@ -439,7 +422,6 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 			return undefined;
 		}
 
-		notify(ctx, `Native compact replay 生效：${rewrite.rewrittenPayload.input.length} items`, "info");
 		return rewrite.rewrittenPayload;
 	}
 
