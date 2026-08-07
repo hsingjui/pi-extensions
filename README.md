@@ -6,7 +6,7 @@ Pi Coding Agent 个人扩展仓库。
 
 | 包 | 说明 |
 |---|---|
-| `packages/cc-ui` | TUI 界面增强（含 6 个精选 themes） |
+| `packages/cc-ui` | TUI 界面增强（含 12 个精选 themes：6 dark + 6 light） |
 | `packages/handoff` | 任务交接扩展 |
 | `packages/mystatusline` | 自定义状态栏 |
 | `packages/notify` | 任务结束等待输入时的终端系统通知 |

@@ -6,9 +6,9 @@ import { codeToANSI } from "@shikijs/cli";
 import * as Diff from "diff";
 import type { BundledLanguage, BundledTheme } from "shiki";
 import { formatCallStatus } from "./tool-display";
+import { getActiveTheme } from "./theme-runtime";
 
 const RESET = "\x1b[0m";
-const BORDER_COLOR = "\x1b[38;5;238m";
 const TRANSPARENT_BG = "\x1b[49m";
 const TRANSPARENT_RESET = `${RESET}${TRANSPARENT_BG}`;
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
@@ -142,11 +142,11 @@ function isBlankLine(text: string): boolean {
 }
 
 function borderLine(width: number): string {
-  return `${BORDER_COLOR}${"─".repeat(Math.max(1, width))}${TRANSPARENT_RESET}`;
+  return `${getActiveTheme().fg("borderMuted", "─".repeat(Math.max(1, width)))}${TRANSPARENT_RESET}`;
 }
 
 function isBorderLine(line: string, width: number): boolean {
-  return line.includes(BORDER_COLOR) && stripAnsi(line).trim() === "─".repeat(Math.max(1, width));
+  return stripAnsi(line).trim() === "─".repeat(Math.max(1, width));
 }
 
 function alreadyHasToolBorder(rendered: readonly string[], width: number): boolean {
@@ -403,6 +403,7 @@ export function lang(filePath: string): BundledLanguage | undefined {
 }
 
 let DIFF_THEME: BundledTheme = "github-dark";
+let IS_LIGHT_THEME = false;
 const MAX_TERM_WIDTH = 210;
 const DEFAULT_TERM_WIDTH = 200;
 const MAX_PREVIEW_LINES = 60;
@@ -411,7 +412,7 @@ const MAX_HL_CHARS = 80_000;
 const CACHE_LIMIT = 192;
 const WORD_DIFF_MIN_SIM = 0.15;
 
-let D_RST = "\x1b[0m";
+const D_RST = "\x1b[0m";
 const D_BOLD = "\x1b[1m";
 const D_DIM = "\x1b[2m";
 let BG_ADD = "\x1b[48;2;36;60;42m";
@@ -431,6 +432,8 @@ let FG_SAFE_MUTED = "\x1b[38;2;139;148;158m";
 let FG_STRIPE = "\x1b[38;2;40;40;40m";
 let DIVIDER = `${FG_RULE}│${D_RST}`;
 
+type DiffThemeLike = Pick<Theme, "fg" | "bg"> & { readonly name?: string };
+
 export interface DiffColors {
   fgAdd: string;
   fgDel: string;
@@ -442,7 +445,50 @@ let DEFAULT_DIFF_COLORS: DiffColors = {
   fgCtx: FG_DIM,
 };
 
-export function resolveDiffColors(_theme?: unknown): DiffColors {
+function ansiPrefix(value: string): string {
+  const marker = "\0";
+  const index = value.indexOf(marker);
+  return index >= 0 ? value.slice(0, index) : "";
+}
+
+function themeFg(theme: DiffThemeLike, color: Parameters<Theme["fg"]>[0]): string {
+  return ansiPrefix(theme.fg(color, "\0"));
+}
+
+function themeBg(theme: DiffThemeLike, color: Parameters<Theme["bg"]>[0]): string {
+  return ansiPrefix(theme.bg(color, "\0"));
+}
+
+function syncDiffPalette(theme: DiffThemeLike = getActiveTheme()): void {
+  const themeName = theme.name?.toLowerCase() ?? "";
+  IS_LIGHT_THEME = themeName === "light" || themeName.includes("light");
+  DIFF_THEME = IS_LIGHT_THEME ? "github-light" : "github-dark";
+
+  BG_ADD = themeBg(theme, "toolSuccessBg") || TRANSPARENT_BG;
+  BG_DEL = themeBg(theme, "toolErrorBg") || TRANSPARENT_BG;
+  BG_ADD_W = themeBg(theme, "selectedBg") || BG_ADD;
+  BG_DEL_W = themeBg(theme, "selectedBg") || BG_DEL;
+  BG_GUTTER_ADD = BG_ADD;
+  BG_GUTTER_DEL = BG_DEL;
+  BG_EMPTY = TRANSPARENT_BG;
+  BG_BASE = TRANSPARENT_BG;
+
+  FG_ADD = themeFg(theme, "toolDiffAdded");
+  FG_DEL = themeFg(theme, "toolDiffRemoved");
+  FG_DIM = themeFg(theme, "toolDiffContext");
+  FG_LNUM = themeFg(theme, "dim");
+  FG_RULE = themeFg(theme, "borderMuted");
+  FG_SAFE_MUTED = themeFg(theme, "muted") || FG_DIM;
+  FG_STRIPE = themeFg(theme, "borderMuted") || FG_DIM;
+  DIVIDER = `${FG_RULE}│${D_RST}`;
+
+  DEFAULT_DIFF_COLORS.fgAdd = FG_ADD;
+  DEFAULT_DIFF_COLORS.fgDel = FG_DEL;
+  DEFAULT_DIFF_COLORS.fgCtx = FG_DIM;
+}
+
+export function resolveDiffColors(theme?: DiffThemeLike): DiffColors {
+  syncDiffPalette(theme);
   return DEFAULT_DIFF_COLORS;
 }
 
@@ -499,20 +545,32 @@ function keepBackgroundAcrossResets(text: string, background: string): string {
 }
 function normalizeShikiContrast(ansi: string): string {
   return ansi.replace(/\x1b\[([0-9;]*)m/g, (seq, params: string) => {
-    if (
+    if (IS_LIGHT_THEME) {
+      if (
+        params === "37" ||
+        params === "97" ||
+        params === "38;5;7" ||
+        params === "38;5;15"
+      )
+        return FG_SAFE_MUTED;
+    } else if (
       params === "30" ||
       params === "90" ||
       params === "38;5;0" ||
       params === "38;5;8"
-    )
+    ) {
       return FG_SAFE_MUTED;
+    }
+
     if (!params.startsWith("38;2;")) return seq;
     const parts = params.split(";").map(Number);
     if (parts.length !== 5 || parts.some((n) => !Number.isFinite(n)))
       return seq;
     const [, , r, g, b] = parts;
     const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-    return luminance < 72 ? FG_SAFE_MUTED : seq;
+    return IS_LIGHT_THEME
+      ? luminance > 235 ? FG_SAFE_MUTED : seq
+      : luminance < 72 ? FG_SAFE_MUTED : seq;
   });
 }
 function wrapAnsi(text: string, width: number, fillBg = ""): string[] {
@@ -642,6 +700,7 @@ export function parseDiff(
 }
 
 function summarizeDiff(added: number, removed: number): string {
+  syncDiffPalette();
   const parts: string[] = [];
   if (added > 0) parts.push(`${FG_ADD}+${added}${D_RST}`);
   if (removed > 0) parts.push(`${FG_DEL}-${removed}${D_RST}`);
@@ -699,7 +758,9 @@ async function hlBlock(
 export async function highlightCodeBlock(
   code: string,
   language: BundledLanguage | undefined,
+  theme?: Theme,
 ): Promise<string[]> {
+  syncDiffPalette(theme);
   return hlBlock(code, language);
 }
 
@@ -806,6 +867,7 @@ export async function renderSplit(
   max = MAX_PREVIEW_LINES,
   dc: DiffColors = DEFAULT_DIFF_COLORS,
 ): Promise<string> {
+  syncDiffPalette();
   const tw = termW();
   if (!shouldUseSplit(diff, tw)) return renderUnified(diff, language, max, dc);
   const rows: Array<{ left: DiffLine | null; right: DiffLine | null }> = [];

@@ -7,10 +7,9 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import { PROMPT_PREFIX, USER_MESSAGE_TOP_SPACING } from "../constants";
+import { getActiveTheme, getActiveThemeVersion } from "../theme-runtime";
 import { stripAnsi } from "../utils";
 
-const BG_USER_MSG = "\x1b[48;2;55;55;55m";
-const BG_RESET = "\x1b[49m";
 const BG_ESCAPE_RE = /\x1b\[(?:49|4\d|10\d|48;5;\d+|48;2;\d+;\d+;\d+)m/g;
 
 function stripBackgroundAnsi(text: string): string {
@@ -18,7 +17,7 @@ function stripBackgroundAnsi(text: string): string {
 }
 
 function withUserMessageBg(text: string): string {
-  return `${BG_USER_MSG}${stripBackgroundAnsi(text)}${BG_RESET}`;
+  return getActiveTheme().bg("userMessageBg", stripBackgroundAnsi(text));
 }
 
 function isMarkdownLike(
@@ -73,7 +72,7 @@ export function patchUserMessageComponent(): void {
           const fillUserMessageLine = (text: string) => withUserMessageBg(truncateToWidth(stripBackgroundAnsi(text), contentWidth, "", true));
 
           // 文本/样式不变时复用同一个 Markdown 实例，避免每帧重新解析标记。
-          const cacheKey = md.text;
+          const cacheKey = `${md.text}\0${getActiveThemeVersion()}`;
           let compactMd = this.__piCcUiCompactMd;
           if (!compactMd || this.__piCcUiCompactMdKey !== cacheKey) {
             compactMd = new Markdown(
@@ -83,7 +82,7 @@ export function patchUserMessageComponent(): void {
               md.theme,
               {
                 ...md.defaultTextStyle,
-                bgColor: (text: string) => `\x1b[48;2;55;55;55m${text}\x1b[49m`,
+                bgColor: (text: string) => withUserMessageBg(text),
               },
             );
             this.__piCcUiCompactMd = compactMd;

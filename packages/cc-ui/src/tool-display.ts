@@ -572,7 +572,7 @@ function renderHighlightedReadPreview(
   if (state.__readPreviewKey !== key) {
     state.__readPreviewKey = key;
     state.__readPreviewText = formatResultSummary(summary, theme.fg("muted", "rendering preview…"), theme);
-    highlightCodeBlock(previewSource, language)
+    highlightCodeBlock(previewSource, language, theme)
       .then((renderedLines) => {
         const currentState = context.state as Record<string, unknown> | undefined;
         if (currentState?.__readPreviewKey !== key) return;

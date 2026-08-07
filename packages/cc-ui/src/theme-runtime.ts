@@ -1,6 +1,8 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
-type ThemeLike = Pick<Theme, "fg" | "bg" | "bold" | "getBashModeBorderColor">;
+type ThemeLike = Pick<Theme, "fg" | "bg" | "bold" | "getBashModeBorderColor"> & {
+  readonly name?: string;
+};
 
 const identity = (text: string) => text;
 
@@ -15,7 +17,7 @@ let activeTheme: ThemeLike = fallbackTheme;
 let activeThemeVersion = 0;
 
 export function setActiveTheme(theme: Theme | null | undefined): void {
-  if (!theme || theme === activeTheme) return;
+  if (!theme) return;
   activeTheme = theme;
   activeThemeVersion++;
 }
