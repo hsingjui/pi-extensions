@@ -180,7 +180,11 @@ async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<
 
 	return {
 		apiKey: auth.apiKey,
-		headers: auth.headers,
+		headers:
+			auth.headers &&
+			(Object.fromEntries(
+				Object.entries(auth.headers).filter(([, value]) => value !== null),
+			) as Record<string, string>),
 		model: model || ctx.model.id,
 		compactUrl: buildCompactUrl(ctx.model.baseUrl),
 		identityUrl: ctx.model.baseUrl,
