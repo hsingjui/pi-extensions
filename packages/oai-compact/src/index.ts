@@ -227,8 +227,17 @@ function getPromptThresholdHit(input: {
 
 // ponytail: 模块级防重入标志，避免多轮 agent_end 重复调度压缩
 let compactionScheduled = false;
+let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 
-function schedulePromptedCompaction(ctx: ExtensionContext) {
+function cancelPromptedCompaction() {
+	if (compactionTimer !== undefined) {
+		clearTimeout(compactionTimer);
+		compactionTimer = undefined;
+	}
+	compactionScheduled = false;
+}
+
+function schedulePromptedCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 	if (compactionScheduled) {
 		return;
 	}
@@ -238,25 +247,41 @@ function schedulePromptedCompaction(ctx: ExtensionContext) {
 	let attempt = 0;
 
 	const runWhenIdle = () => {
-		attempt += 1;
-		if ((!ctx.isIdle() || ctx.hasPendingMessages()) && attempt < maxAttempts) {
-			setTimeout(runWhenIdle, 1000);
+		compactionTimer = undefined;
+		if (!compactionScheduled) {
 			return;
 		}
 
-		compactionScheduled = false;
-
+		attempt += 1;
 		if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+			if (attempt < maxAttempts) {
+				compactionTimer = setTimeout(runWhenIdle, 1000);
+				return;
+			}
+
+			compactionScheduled = false;
 			notify(ctx, "已达到压缩阈值，但 agent 持续忙碌，请稍后手动运行 /compact。", "warning");
+			return;
+		}
+
+		const lastEntry = ctx.sessionManager.getBranch().at(-1);
+		if (lastEntry?.type === "compaction") {
+			cancelPromptedCompaction();
 			return;
 		}
 
 		notify(ctx, "开始自动压缩上下文…", "info");
 		ctx.compact({
 			onComplete: (result) => {
+				compactionScheduled = false;
 				notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
+				pi.sendUserMessage("continue", { deliverAs: "followUp" });
 			},
 			onError: (error) => {
+				compactionScheduled = false;
+				if (error.message.includes("Already compacted")) {
+					return;
+				}
 				if (error.message.includes("Nothing to compact")) {
 					notify(ctx, "会话内容过少，暂无可压缩内容，继续对话后再试。", "info");
 					return;
@@ -266,10 +291,10 @@ function schedulePromptedCompaction(ctx: ExtensionContext) {
 		});
 	};
 
-	setTimeout(runWhenIdle, 1000);
+	compactionTimer = setTimeout(runWhenIdle, 1000);
 }
 
-async function handleAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
+async function handleAgentEnd(pi: ExtensionAPI, event: AgentEndEvent, ctx: ExtensionContext) {
 	if (!ctx.model) {
 		return;
 	}
@@ -289,10 +314,12 @@ async function handleAgentEnd(event: AgentEndEvent, ctx: ExtensionContext) {
 		: "开始自动压缩…";
 	notify(ctx, `上下文已达到压缩阈值（${hit.reasons.join("；")}），${suffix}`, "info");
 
-	schedulePromptedCompaction(ctx);
+	schedulePromptedCompaction(pi, ctx);
 }
 
 async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
+	cancelPromptedCompaction();
+
 	if (!ctx.model) {
 		return undefined;
 	}
@@ -429,7 +456,7 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("agent_end", handleAgentEnd);
+	pi.on("agent_end", (event, ctx) => handleAgentEnd(pi, event, ctx));
 	pi.on("session_before_compact", handleSessionBeforeCompact);
 	pi.on("before_provider_request", handleBeforeProviderRequest);
 }
