@@ -298,16 +298,12 @@ async function syncHerdrTabLabel(pi: ExtensionAPI, name: string | undefined) {
 
 export default function (pi: ExtensionAPI) {
 
-	pi.on("session_start", (event, ctx) => {
+	pi.on("session_start", () => {
 		naming = false;
 		pendingUserText = undefined;
 		retryPending = false;
 		// 启动/恢复已有名称的会话时同步给 Herdr
 		void syncHerdrTabLabel(pi, pi.getSessionName());
-		// 仅启动时提醒一次，便于确认扩展已加载
-		if (event.reason === "startup") {
-			notify(ctx, "pi-session-name 扩展已加载", "info");
-		}
 	});
 
 	// 自动命名 / 手动 /name 修改 / 清除时同步给 Herdr
