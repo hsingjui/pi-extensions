@@ -322,9 +322,8 @@ export function patchToolExecutionComponent(): void {
 
   proto.getResultRenderer = function getResultRendererPatched(this: ToolExecutionPrototypeLike): unknown {
     if (this.toolName === "mcp") {
-      // mcp 结果强制走 createResultFallback 的摘要格式(带 └─ 分支),
-      // 与内置工具一致;pi-mcp-adapter 自带的 renderResult 没有分支线。
-      return undefined;
+      // 新版 pi-mcp-adapter 自带 compact/self renderer；只有旧版没有 renderer 时才走下方 fallback。
+      return originalGetResultRenderer?.call(this);
     }
     const compactRenderer = this.toolName ? getCompactToolResultRenderer(this.toolName) : undefined;
     return compactRenderer ?? originalGetResultRenderer?.call(this);

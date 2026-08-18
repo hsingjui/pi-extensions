@@ -12,7 +12,7 @@ import {
 import { patchAssistantMessageComponent } from "./patches/assistant-message";
 import { patchToolExecutionComponent } from "./patches/tool-execution";
 import { patchUserMessageComponent } from "./patches/user-message";
-import { applyToolBackgroundMode, patchGlobalToolBorders, registerMcpToolOverrides } from "./tool-style";
+import { applyToolBackgroundMode, patchGlobalToolBorders } from "./tool-style";
 import { setActiveTheme } from "./theme-runtime";
 import { PromptPrefixEditor } from "./ui/prompt-prefix-editor";
 import {
@@ -32,8 +32,6 @@ patchGlobalToolBorders();
 const EXTENSION_VERSION = "0.1.0";
 
 export default function (pi: ExtensionAPI) {
-  registerMcpToolOverrides(pi);
-
   pi.on("session_start", async (_event, ctx) => {
     setActiveTheme(ctx.ui.theme);
     ctx.ui.setHeader((_tui, theme) => createStartupHeader(theme, {

@@ -1329,6 +1329,9 @@ export function getCompactToolCallRenderer(toolName: string) {
       return (args: EditToolInput, theme: Theme, context: ToolRenderContextLike<EditToolInput>) => renderEditCall(args, theme, context);
     case "write":
       return (args: WriteToolInput, theme: Theme, context: ToolRenderContextLike<WriteToolInput>) => renderWriteCall(args, theme, context);
+    case "mcpScript":
+      return (_args: unknown, theme: Theme, context: ToolRenderContextLike<unknown>) =>
+        reuseText(context.lastComponent, `${formatCallStatus(context, theme)}${theme.fg("toolTitle", theme.bold("MCP Script"))}`);
     default:
       return undefined;
   }
