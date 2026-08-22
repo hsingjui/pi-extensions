@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import {
 	buildSessionContext,
-	type AgentEndEvent,
 	type BeforeProviderRequestEvent,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -229,101 +228,56 @@ function getPromptThresholdHit(input: {
 	return { reached: reasons.length > 0, reasons };
 }
 
-// ponytail: 模块级防重入标志，避免多轮 agent_end 重复调度压缩
+// ponytail: 模块级防重入标志；思考/工具完成的间隙会多次触发，压缩在途时忽略其余触发
 let compactionScheduled = false;
-let compactionTimer: ReturnType<typeof setTimeout> | undefined;
 
-function cancelPromptedCompaction() {
-	if (compactionTimer !== undefined) {
-		clearTimeout(compactionTimer);
-		compactionTimer = undefined;
+async function checkAndCompact(pi: ExtensionAPI, ctx: ExtensionContext) {
+	if (compactionScheduled || !ctx.model) {
+		return;
 	}
-	compactionScheduled = false;
+
+	const configFile = loadCompactConfigFile();
+	const threshold = getModelPromptThreshold(configFile, ctx);
+	const hit = getPromptThresholdHit({ threshold, usage: ctx.getContextUsage() });
+	if (!hit.reached) {
+		return;
+	}
+
+	const lastEntry = ctx.sessionManager.getBranch().at(-1);
+	if (lastEntry?.type === "compaction") {
+		return;
+	}
+
+	notify(ctx, `上下文已达到压缩阈值（${hit.reasons.join("；")}），开始自动压缩…`, "info");
+	runCompaction(pi, ctx);
 }
 
-function schedulePromptedCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
+function runCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 	if (compactionScheduled) {
 		return;
 	}
 	compactionScheduled = true;
 
-	const maxAttempts = 120;
-	let attempt = 0;
-
-	const runWhenIdle = () => {
-		compactionTimer = undefined;
-		if (!compactionScheduled) {
-			return;
-		}
-
-		attempt += 1;
-		if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-			if (attempt < maxAttempts) {
-				compactionTimer = setTimeout(runWhenIdle, 1000);
+	ctx.compact({
+		onComplete: (result) => {
+			compactionScheduled = false;
+			notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
+			pi.sendUserMessage("continue", { deliverAs: "followUp" });
+		},
+		onError: (error) => {
+			compactionScheduled = false;
+			if (
+				error.message.includes("Already compacted") ||
+				error.message.includes("Nothing to compact")
+			) {
 				return;
 			}
-
-			compactionScheduled = false;
-			notify(ctx, "已达到压缩阈值，但 agent 持续忙碌，请稍后手动运行 /compact。", "warning");
-			return;
-		}
-
-		const lastEntry = ctx.sessionManager.getBranch().at(-1);
-		if (lastEntry?.type === "compaction") {
-			cancelPromptedCompaction();
-			return;
-		}
-
-		notify(ctx, "开始自动压缩上下文…", "info");
-		ctx.compact({
-			onComplete: (result) => {
-				compactionScheduled = false;
-				notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
-				pi.sendUserMessage("continue", { deliverAs: "followUp" });
-			},
-			onError: (error) => {
-				compactionScheduled = false;
-				if (error.message.includes("Already compacted")) {
-					return;
-				}
-				if (error.message.includes("Nothing to compact")) {
-					notify(ctx, "会话内容过少，暂无可压缩内容，继续对话后再试。", "info");
-					return;
-				}
-				notify(ctx, `压缩失败：${error.message}`, "error");
-			},
-		});
-	};
-
-	compactionTimer = setTimeout(runWhenIdle, 1000);
-}
-
-async function handleAgentEnd(pi: ExtensionAPI, event: AgentEndEvent, ctx: ExtensionContext) {
-	if (!ctx.model) {
-		return;
-	}
-
-	const configFile = loadCompactConfigFile();
-
-	const threshold = getModelPromptThreshold(configFile, ctx);
-
-	const hit = getPromptThresholdHit({ threshold, usage: ctx.getContextUsage() });
-
-	if (!hit.reached) {
-		return;
-	}
-
-	const suffix = ctx.hasPendingMessages()
-		? "当前还有排队消息，将在空闲后自动压缩。"
-		: "开始自动压缩…";
-	notify(ctx, `上下文已达到压缩阈值（${hit.reasons.join("；")}），${suffix}`, "info");
-
-	schedulePromptedCompaction(pi, ctx);
+			notify(ctx, `压缩失败：${error.message}`, "error");
+		},
+	});
 }
 
 async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
-	cancelPromptedCompaction();
-
 	if (!ctx.model) {
 		return undefined;
 	}
@@ -460,7 +414,11 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.on("agent_end", (event, ctx) => handleAgentEnd(pi, event, ctx));
+	// 思考完成或工具调用完成时检查阈值，命中立即压缩，不等 agent 整轮运行结束
+	pi.on("message_end", (event, ctx) =>
+		event.message.role === "assistant" ? checkAndCompact(pi, ctx) : undefined,
+	);
+	pi.on("tool_execution_end", (_event, ctx) => checkAndCompact(pi, ctx));
 	pi.on("session_before_compact", handleSessionBeforeCompact);
 	pi.on("before_provider_request", handleBeforeProviderRequest);
 }

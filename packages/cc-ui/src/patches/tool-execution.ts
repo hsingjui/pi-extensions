@@ -247,7 +247,7 @@ function getNeutralToolBackground(): ((text: string) => string) | undefined {
   }
 }
 
-const TOOL_EXECUTION_PATCH_VERSION = "assistant-tool-spacing-v2";
+const TOOL_EXECUTION_PATCH_VERSION = "assistant-tool-spacing-v3-mcp-fallback";
 
 export function patchToolExecutionComponent(): void {
   const proto = ToolExecutionComponent.prototype as unknown as ToolExecutionPrototypeLike;
@@ -302,6 +302,10 @@ export function patchToolExecutionComponent(): void {
   };
 
   proto.getCallRenderer = function getCallRendererPatched(this: ToolExecutionPrototypeLike): unknown {
+    if (this.toolName === "mcp") {
+      return undefined;
+    }
+
     const compactRenderer = this.toolName ? getCompactToolCallRenderer(this.toolName) : undefined;
     if (compactRenderer) return compactRenderer;
 
@@ -322,8 +326,8 @@ export function patchToolExecutionComponent(): void {
 
   proto.getResultRenderer = function getResultRendererPatched(this: ToolExecutionPrototypeLike): unknown {
     if (this.toolName === "mcp") {
-      // 新版 pi-mcp-adapter 自带 compact/self renderer；只有旧版没有 renderer 时才走下方 fallback。
-      return originalGetResultRenderer?.call(this);
+      // MCP proxy 的原生 compact/self renderer 会隐藏最终 call，并绕过 cc-ui 的分支结果样式。
+      return undefined;
     }
     const compactRenderer = this.toolName ? getCompactToolResultRenderer(this.toolName) : undefined;
     return compactRenderer ?? originalGetResultRenderer?.call(this);
