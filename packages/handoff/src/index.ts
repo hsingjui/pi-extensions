@@ -7,7 +7,7 @@ import {
 } from "@earendil-works/pi-ai/compat";
 import type {
   ExtensionAPI,
-  ExtensionCommandContext,
+  ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
   buildSessionContext,
@@ -157,9 +157,9 @@ function getToolChoice(model: { api: string }): unknown {
   }
 }
 
-async function generateHandoffContext(
+export async function generateHandoffContext(
   args: string,
-  ctx: ExtensionCommandContext,
+  ctx: ExtensionContext,
   signal?: AbortSignal,
 ): Promise<string | null> {
   const sessionContext = buildSessionContext(
@@ -227,6 +227,20 @@ async function generateHandoffContext(
   }
 
   return formatHandoffContext(handoff);
+}
+
+// 常驻注册 create_handoff_context 工具：工具定义稳定出现在每个请求的工具列表中，保证提示词缓存命中
+export function registerHandoffTool(pi: ExtensionAPI) {
+	pi.registerTool({
+		name: TOOL_NAME,
+		label: "Create handoff context",
+		description: handoffTool.description,
+		parameters: handoffTool.parameters,
+		execute: async (_toolCallId, params) => ({
+			content: [{ type: "text", text: formatHandoffContext(params) }],
+			details: params,
+		}),
+	});
 }
 
 export default function (pi: ExtensionAPI) {

@@ -4,6 +4,10 @@
   "description": "Handoff extension for Pi Coding Agent",
   "license": "MIT",
   "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "packageManager": "pnpm@10",
   "keywords": [
     "pi-package",
@@ -18,9 +22,11 @@
   "scripts": {
     "check": "tsc --noEmit"
   },
-  "devDependencies": {
+  "dependencies": {
     "@earendil-works/pi-ai": "catalog:",
-    "@earendil-works/pi-coding-agent": "catalog:",
+    "@earendil-works/pi-coding-agent": "catalog:"
+  },
+  "devDependencies": {
     "typescript": "^5.9.3"
   }
 }

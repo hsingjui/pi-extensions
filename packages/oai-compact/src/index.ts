@@ -8,7 +8,12 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 	type SessionBeforeCompactEvent,
+	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import handoffExtension, {
+	generateHandoffContext,
+	registerHandoffTool,
+} from "pi-handoff";
 import { executeNativeCompaction } from "./compact-client.js";
 import { resolveLatestNativeCompactionEntry } from "./details-store.js";
 import {
@@ -20,7 +25,7 @@ import {
 	isResponsesCompatiblePayload,
 } from "./runtime.js";
 import { serializeInstructionsToResponsesInput, serializeMessagesToResponsesInput, type NativeCompactionRequestBody } from "./serializer.js";
-import { createNativeCompactionDetails, createNativeCompactionShimResult } from "./types.js";
+import { createHandoffCompactionDetails, createHandoffCompactionShimResult, createNativeCompactionDetails, createNativeCompactionShimResult } from "./types.js";
 
 type CompactThresholdFileValue =
 	| number
@@ -33,6 +38,8 @@ type CompactConfigFile = {
 	model?: string;
 	promptThreshold?: CompactThresholdFileValue;
 	modelPromptThresholds?: Record<string, CompactThresholdFileValue>;
+	// 非 openai-responses API 的压缩策略："off" 取消压缩，"pi" 用 Pi 内置压缩，"handoff" 用 handoff 摘要代替内置压缩
+	nonResponses?: "off" | "pi" | "handoff";
 };
 
 type LoadedCompactConfigFile = {
@@ -166,6 +173,64 @@ function getModelPromptThreshold(
 	);
 }
 
+function getNonResponsesMode(configFile: LoadedCompactConfigFile | undefined): "off" | "pi" | "handoff" {
+	const value = configFile?.config.nonResponses;
+	return value === "pi" || value === "handoff" ? value : "off";
+}
+
+// 取最近一条用户消息文本作为 handoff 提取的请求上下文
+function extractLatestUserRequest(branchEntries: readonly SessionEntry[]): string {
+	for (let i = branchEntries.length - 1; i >= 0; i--) {
+		const entry = branchEntries[i];
+		if (entry.type !== "message" || entry.message.role !== "user") continue;
+
+		const content = entry.message.content;
+		if (!Array.isArray(content)) continue;
+
+		const text = content
+			.filter((part): part is { type: "text"; text: string } => part.type === "text")
+			.map((part) => part.text)
+			.join("\n")
+			.trim();
+		if (text) return text.slice(0, 2000);
+	}
+	return "";
+}
+
+// 非 openai-responses：用 handoff 提取逻辑生成交接摘要作为压缩内容；生成失败则取消压缩
+async function handleHandoffCompaction(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
+	if (!ctx.model) return { cancel: true };
+
+	const request = extractLatestUserRequest(event.branchEntries);
+	let summary: string | null = null;
+	try {
+		summary = await generateHandoffContext(request, ctx, event.signal);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		notify(ctx, `Handoff 压缩失败：${message}，已取消压缩`, "warning");
+		return { cancel: true };
+	}
+
+	if (!summary) {
+		notify(ctx, "Handoff 压缩失败，已取消压缩", "warning");
+		return { cancel: true };
+	}
+
+	notify(ctx, "Handoff 压缩成功：已用交接摘要压缩上下文", "info");
+	return {
+		compaction: createHandoffCompactionShimResult({
+			firstKeptEntryId: event.preparation.firstKeptEntryId,
+			tokensBefore: event.preparation.tokensBefore,
+			summary,
+			details: createHandoffCompactionDetails({
+				provider: ctx.model.provider,
+				api: ctx.model.api,
+				model: ctx.model.id,
+			}),
+		}),
+	};
+}
+
 async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<CompactConfig | undefined> {
 	if (!ctx.model) return undefined;
 
@@ -173,7 +238,7 @@ async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<
 	const model = configFile?.config.model?.trim();
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 	if (!auth.ok) {
-		notify(ctx, `读取当前模型认证失败：${auth.error}，回退默认 compact`, "warning");
+		notify(ctx, `读取当前模型认证失败：${auth.error}，已取消压缩`, "warning");
 		return undefined;
 	}
 
@@ -228,11 +293,11 @@ function getPromptThresholdHit(input: {
 	return { reached: reasons.length > 0, reasons };
 }
 
-// ponytail: 模块级防重入标志；思考/工具完成的间隙会多次触发，压缩在途时忽略其余触发
+// ponytail: 模块级防重入标志；压缩在途时忽略相邻 turn_end 或手动触发
 let compactionScheduled = false;
 
 async function checkAndCompact(pi: ExtensionAPI, ctx: ExtensionContext) {
-	if (compactionScheduled || !ctx.model) {
+	if (compactionScheduled || !ctx.model || ctx.model.api !== "openai-responses") {
 		return;
 	}
 
@@ -268,7 +333,8 @@ function runCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 			compactionScheduled = false;
 			if (
 				error.message.includes("Already compacted") ||
-				error.message.includes("Nothing to compact")
+				error.message.includes("Nothing to compact") ||
+				error.message.includes("Compaction cancelled")
 			) {
 				return;
 			}
@@ -278,17 +344,21 @@ function runCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 }
 
 async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
-	if (!ctx.model) {
-		return undefined;
-	}
-
-	if (ctx.model.api !== "openai-responses") {
-		return undefined;
+	if (!ctx.model || ctx.model.api !== "openai-responses") {
+		switch (getNonResponsesMode(loadCompactConfigFile())) {
+			case "pi":
+				// 放行 Pi 内置 compact
+				return undefined;
+			case "handoff":
+				return handleHandoffCompaction(event, ctx);
+			default:
+				return { cancel: true };
+		}
 	}
 
 	const config = await resolveCurrentModelCompactConfig(ctx);
 	if (!config) {
-		return undefined;
+		return { cancel: true };
 	}
 
 	if (event.signal.aborted) {
@@ -326,7 +396,8 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 			],
 		};
 	} else {
-		return undefined;
+		notify(ctx, "最近一次压缩不是 Native compact，已取消压缩", "warning");
+		return { cancel: true };
 	}
 
 	request.prompt_cache_key = promptCacheKey;
@@ -351,8 +422,8 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		}
 
 		const detail = result.errorMessage ? `：${result.errorMessage}` : "";
-		notify(ctx, `Native compact 失败：${result.reason}${detail}`, "warning");
-		return undefined;
+		notify(ctx, `Native compact 失败：${result.reason}${detail}，已取消压缩`, "warning");
+		return { cancel: true };
 	}
 
 	const compaction = createNativeCompactionShimResult({
@@ -414,11 +485,13 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 }
 
 export default function (pi: ExtensionAPI) {
-	// 思考完成或工具调用完成时检查阈值，命中立即压缩，不等 agent 整轮运行结束
-	pi.on("message_end", (event, ctx) =>
-		event.message.role === "assistant" ? checkAndCompact(pi, ctx) : undefined,
-	);
-	pi.on("tool_execution_end", (_event, ctx) => checkAndCompact(pi, ctx));
+	// 合并 pi-handoff：注册 /handoff 命令（生成交接摘要并新建 session）
+	handoffExtension(pi);
+	// 常驻注册交接工具，稳定工具列表以命中提示词缓存
+	registerHandoffTool(pi);
+
+	// 一次模型响应及其工具结果全部落盘后检查，命中时在下一次模型请求前压缩
+	pi.on("turn_end", (_event, ctx) => checkAndCompact(pi, ctx));
 	pi.on("session_before_compact", handleSessionBeforeCompact);
 	pi.on("before_provider_request", handleBeforeProviderRequest);
 }

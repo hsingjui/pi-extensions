@@ -1,7 +1,10 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { NativeCompactionRequestBody } from "./serializer.js";
 
 const JSON_CONTENT_TYPE = "application/json";
+const NATIVE_COMPACTION_MAX_RETRIES = 3;
+const NATIVE_COMPACTION_RETRY_BASE_DELAY_MS = 1000;
 
 export type CompactClientConfig = {
 	compactUrl: string;
@@ -85,6 +88,19 @@ function isAbortError(error: unknown): boolean {
 		(error instanceof DOMException && error.name === "AbortError") ||
 		(error instanceof Error && (error.name === "AbortError" || error.name === "ABORT_ERR"))
 	);
+}
+
+function isRetryableStatus(status: number): boolean {
+	return status === 429 || status >= 500;
+}
+
+async function waitBeforeRetry(attempt: number, signal?: AbortSignal): Promise<boolean> {
+	try {
+		await sleep(NATIVE_COMPACTION_RETRY_BASE_DELAY_MS * 2 ** attempt, undefined, { signal });
+		return true;
+	} catch (error) {
+		return !(signal?.aborted || isAbortError(error));
+	}
 }
 
 function normalizeResponseTimestamp(value: unknown): string | undefined {
@@ -183,87 +199,102 @@ export async function executeNativeCompaction(args: {
 	const dispatcher = createDispatcher(config.proxy);
 
 	try {
-		const response = await undiciFetch(config.compactUrl, {
-			dispatcher,
-			method: "POST",
-			headers: createJsonRequestHeaders(config),
-			body: JSON.stringify(request),
-			signal,
-		});
+		for (let attempt = 0; ; attempt++) {
+			try {
+				const response = await undiciFetch(config.compactUrl, {
+					dispatcher,
+					method: "POST",
+					headers: createJsonRequestHeaders(config),
+					body: JSON.stringify(request),
+					signal,
+				});
 
-		const responseText = await response.text();
-		if (!response.ok) {
-			return {
-				ok: false,
-				reason: "non-2xx",
-				status: response.status,
-				errorMessage: response.statusText || `HTTP ${response.status}`,
-				responseText,
-			};
+				const responseText = await response.text();
+				if (!response.ok) {
+					if (attempt < NATIVE_COMPACTION_MAX_RETRIES && isRetryableStatus(response.status)) {
+						if (!(await waitBeforeRetry(attempt, signal))) {
+							return { ok: false, reason: "aborted" };
+						}
+						continue;
+					}
+
+					return {
+						ok: false,
+						reason: "non-2xx",
+						status: response.status,
+						errorMessage: response.statusText || `HTTP ${response.status}`,
+						responseText,
+					};
+				}
+
+				if (!responseText.trim()) {
+					return {
+						ok: false,
+						reason: "empty-body",
+						status: response.status,
+					};
+				}
+
+				let responseJson: unknown;
+				try {
+					responseJson = JSON.parse(responseText);
+				} catch (error) {
+					return {
+						ok: false,
+						reason: "invalid-json",
+						status: response.status,
+						errorMessage: error instanceof Error ? error.message : String(error),
+						responseText,
+					};
+				}
+
+				if (!isCompactResponseEnvelope(responseJson)) {
+					return {
+						ok: false,
+						reason: "malformed-response",
+						status: response.status,
+						responseJson,
+					};
+				}
+
+				if (responseJson.output.length === 0) {
+					return {
+						ok: false,
+						reason: "empty-output",
+						status: response.status,
+						responseJson,
+					};
+				}
+
+				return {
+					ok: true,
+					status: response.status,
+					compactedWindow: [...responseJson.output],
+					compactResponseId: typeof responseJson.id === "string" && responseJson.id.trim()
+						? responseJson.id.trim()
+						: undefined,
+					createdAt: normalizeResponseTimestamp(responseJson.created_at),
+					response: responseJson,
+				};
+			} catch (error) {
+				if (signal?.aborted || isAbortError(error)) {
+					return { ok: false, reason: "aborted" };
+				}
+
+				if (attempt < NATIVE_COMPACTION_MAX_RETRIES) {
+					if (!(await waitBeforeRetry(attempt, signal))) {
+						return { ok: false, reason: "aborted" };
+					}
+					continue;
+				}
+
+				return {
+					ok: false,
+					reason: "network-error",
+					errorMessage: error instanceof Error ? error.message : String(error),
+				};
+			}
 		}
-
-		if (!responseText.trim()) {
-			return {
-				ok: false,
-				reason: "empty-body",
-				status: response.status,
-			};
-		}
-
-		let responseJson: unknown;
-		try {
-			responseJson = JSON.parse(responseText);
-		} catch (error) {
-			return {
-				ok: false,
-				reason: "invalid-json",
-				status: response.status,
-				errorMessage: error instanceof Error ? error.message : String(error),
-				responseText,
-			};
-		}
-
-		if (!isCompactResponseEnvelope(responseJson)) {
-			return {
-				ok: false,
-				reason: "malformed-response",
-				status: response.status,
-				responseJson,
-			};
-		}
-
-		if (responseJson.output.length === 0) {
-			return {
-				ok: false,
-				reason: "empty-output",
-				status: response.status,
-				responseJson,
-			};
-		}
-
-		return {
-			ok: true,
-			status: response.status,
-			compactedWindow: [...responseJson.output],
-			compactResponseId: typeof responseJson.id === "string" && responseJson.id.trim()
-				? responseJson.id.trim()
-				: undefined,
-			createdAt: normalizeResponseTimestamp(responseJson.created_at),
-			response: responseJson,
-		};
-	} catch (error) {
-		if (signal?.aborted || isAbortError(error)) {
-			return {
-				ok: false,
-				reason: "aborted",
-			};
-		}
-
-		return {
-			ok: false,
-			reason: "network-error",
-			errorMessage: error instanceof Error ? error.message : String(error),
-		};
 	} finally {
 		dispatcher?.close();
 	}
