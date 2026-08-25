@@ -88,12 +88,7 @@ export type ResponsesInputItem =
 	| ResponsesFunctionCallOutputItem
 	| ResponsesReasoningItem;
 
-export type NativeCompactionRequestBody = {
-	model: string;
-	input: unknown[];
-	prompt_cache_key?: string;
-	prompt_cache_retention?: "24h";
-};
+export type NativeCompactionRequestBody = ResponsesCompatibleRequestPayload;
 
 export type SerializeResponsesMessagesOptions = {
 	instructions?: string;

@@ -2,7 +2,7 @@
 
 已合并 pi-handoff：安装本扩展即同时提供 `/handoff` 命令（总结当前上下文，确认后新建 session 交接给 agent），并常驻注册 `create_handoff_context` 工具（工具定义稳定出现在每次请求中以保证提示词缓存命中，模型可在对话中主动调用生成交接摘要）。
 
-仅在 `openai-responses` API 下使用 OpenAI `POST /v1/responses/compact`；非 `openai-responses` API 默认禁用 Pi 内置 compact（可通过 `nonResponses` 开关放行或改用 handoff 摘要，见配置）。
+仅在 `openai-responses` API 下使用 OpenAI remote compaction v2（`POST /v1/responses` + `compaction_trigger`）；非 `openai-responses` API 默认禁用 Pi 内置 compact（可通过 `nonResponses` 开关放行或改用 handoff 摘要，见配置）。
 
 ## 安装
 
@@ -23,7 +23,6 @@ pi -e ./src/index.ts
 ```json
 {
   "oaiCompact": {
-    "model": "gpt-5.2",
     "promptThreshold": { "percent": 80 },
     "modelPromptThresholds": {
       "gpt-5.2": { "percent": 75 },
@@ -38,7 +37,6 @@ pi -e ./src/index.ts
 
 兼容旧配置：未找到 `oaiCompact` 键时，回退到独立配置文件 `oai-compact.json`（按 `$PI_CODING_AGENT_DIR/oai-compact.json`、`~/.pi/oai-compact.json` 顺序查找）。
 
-- `model`：可选，compact 请求使用的模型。
 - `promptThreshold`：可选，仅在 `openai-responses` 下于每次模型响应及其工具结果完成后检查当前上下文，达到阈值时自动执行 native compact。未配置且未命中 `modelPromptThresholds` 时默认为 `80`（80%）。
   - 可以写数字，表示百分比：`"promptThreshold": 80`
   - 也可以写对象：`{ "percent": 80 }`、`{ "tokens": 180000 }`，或二者同时配置（任一达到即提示）
@@ -50,19 +48,44 @@ pi -e ./src/index.ts
 
 native compact 只在当前会话模型是 `openai-responses` 时生效，并复用当前模型的：
 
-- `baseUrl`（自动拼成 `/responses/compact`）
+- 最近一次 normal 请求的完整 Responses payload（包括 `model`、`input`、`tools`、`reasoning`、`text`、`service_tier` 和 prompt cache 配置）
+- `baseUrl`（自动定位 `/responses`）
 - API key / headers（从 Pi 当前模型认证配置读取）
 
-compact 请求里的 `model` 优先使用 `oai-compact.json` 的 `model`；未配置时回退到当前会话模型的 `id`。
+compact 请求不再单独配置 `model`，只在完整 normal payload 的 `input` 末尾追加 `compaction_trigger`。
 
 `promptThreshold` / `modelPromptThresholds` 仅用于 `openai-responses`：每次模型响应及其工具结果完成（`turn_end`）后检查阈值并触发 native compact。Native compact 失败时取消压缩；其他 API 的压缩请求也会直接取消，均不回退 Pi 默认 compact。
+
+## 完整前缀缓存测试
+
+下面的脚本先发送一次完整 normal Responses 请求写入缓存，再发送完整相同 payload 并仅在 `input` 末尾追加 `compaction_trigger`。脚本会断言两次请求的所有顶层字段和完整 input 前缀一致，并输出两次请求的 `input_tokens`、`cached_tokens`。默认使用约 260,000 字符的稳定前缀（`gpt-5.6-luna` 实测约 52k input tokens），共产生 2 次计费请求。
+
+```bash
+OPENAI_BASE_URL=https://api.openai.com/v1 \
+OPENAI_API_KEY=sk-... \
+OPENAI_MODEL=gpt-5.6 \
+pnpm --filter pi-oai-compact test:prefix-cache
+```
+
+命中时输出 `Cache result: HIT`。未命中但 payload 断言通过时会输出警告，可重复执行以排除缓存路由或过期；需要让 cache miss 返回非零退出码时加 `STRICT_CACHE_HIT=1`。可用 `OPENAI_CACHE_PREFIX_CHARS` 调整前缀长度，或用 `OPENAI_SERVICE_TIER`、`OPENAI_REASONING_EFFORT` 匹配实际 normal 请求。
+
+## API 诊断
+
+使用真实 remote compaction v2 端点依次比较基础请求、`prompt_cache_key` 和 `prompt_cache_retention`。每组连续发送两次相同长前缀，并输出两次 `cached_tokens`；脚本不会打印 API key。`all` 默认发送 6 次计费请求，也可指定单个 variant：`base`、`key` 或 `retention`（各发送 2 次）。
+
+```bash
+OPENAI_BASE_URL=https://api.openai.com/v1 \
+OPENAI_API_KEY=sk-... \
+OPENAI_MODEL=gpt-5.2 \
+pnpm --filter pi-oai-compact test:api -- all
+```
 
 ## 行为
 
 - 仅在 `openai-responses` 下监听 `turn_end` 的实际效果：本轮模型响应及其工具结果全部进入上下文后、下一次模型请求前检查阈值并触发 native compact
 - 只处理 `ctx.model.api === "openai-responses"` 的 native compact 会话
 - 监听 `session_before_compact`
-- 调用 OpenAI `responses/compact`，携带与 Pi 正常请求相同的 `prompt_cache_key`（sessionId）且 input 前缀包含 system prompt，命中正常请求已写入的 prompt cache
+- 调用 OpenAI remote compaction v2：复用最近一次 normal 请求的完整 payload，不按 Pi 的 `messagesToSummarize` 裁剪，只在 `input` 末尾追加 `compaction_trigger`
 - 网络错误、`429` 或 `5xx` 最多重试 3 次，按 `1s`、`2s`、`4s` 退避；其他错误立即取消压缩
 - 将返回的原生 compact window 存进 compaction details
 - 监听 `before_provider_request`

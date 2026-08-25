@@ -1,8 +1,12 @@
+import os from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { NativeCompactionRequestBody } from "./serializer.js";
 
+const CODEX_USER_AGENT = `pi (${os.platform()} ${os.release()}; ${os.arch()})`;
 const JSON_CONTENT_TYPE = "application/json";
+const SSE_CONTENT_TYPE = "text/event-stream";
+const REMOTE_COMPACTION_V2_FEATURE = "remote_compaction_v2";
 const NATIVE_COMPACTION_MAX_RETRIES = 3;
 const NATIVE_COMPACTION_RETRY_BASE_DELAY_MS = 1000;
 
@@ -26,6 +30,7 @@ export type NativeCompactionClientFailureReason =
 	| "non-2xx"
 	| "empty-body"
 	| "invalid-json"
+	| "upstream-error"
 	| "malformed-response"
 	| "empty-output";
 
@@ -147,6 +152,10 @@ function createJsonRequestHeaders(config: CompactClientConfig): Record<string, s
 		...config.headers,
 	};
 
+	if (!hasHeader(config.headers, "user-agent")) {
+		headers["user-agent"] = CODEX_USER_AGENT;
+	}
+
 	if (config.apiKey && !hasHeader(config.headers, "authorization")) {
 		headers.authorization = `Bearer ${config.apiKey}`;
 	}
@@ -156,6 +165,119 @@ function createJsonRequestHeaders(config: CompactClientConfig): Record<string, s
 
 function buildResponsesUrl(compactUrl: string): string {
 	return compactUrl.endsWith("/compact") ? compactUrl.slice(0, -"/compact".length) : compactUrl;
+}
+
+function setHeader(headers: Record<string, string>, name: string, value: string) {
+	const existing = Object.keys(headers).find((key) => key.toLowerCase() === name.toLowerCase());
+	headers[existing ?? name] = value;
+}
+
+function createRemoteCompactionHeaders(config: CompactClientConfig): Record<string, string> {
+	const headers = createJsonRequestHeaders(config);
+	setHeader(headers, "accept", SSE_CONTENT_TYPE);
+
+	const existing = Object.entries(headers).find(([key]) => key.toLowerCase() === "x-codex-beta-features");
+	const features = existing?.[1].split(",").map((value) => value.trim()).filter(Boolean) ?? [];
+	if (!features.includes(REMOTE_COMPACTION_V2_FEATURE)) {
+		features.push(REMOTE_COMPACTION_V2_FEATURE);
+	}
+	setHeader(headers, "x-codex-beta-features", features.join(","));
+	return headers;
+}
+
+type ParsedCompactionResponse =
+	| { ok: true; response: CompactResponseEnvelope }
+	| {
+		ok: false;
+		reason: "invalid-json" | "upstream-error" | "malformed-response" | "empty-output";
+		errorMessage?: string;
+		responseJson?: unknown;
+	};
+
+function extractErrorMessage(value: unknown): string | undefined {
+	if (!isRecord(value)) return undefined;
+	for (const candidate of [value.error, value.response]) {
+		if (isRecord(candidate)) {
+			const nested = extractErrorMessage(candidate);
+			if (nested) return nested;
+		}
+	}
+	return typeof value.message === "string" && value.message.trim() ? value.message.trim() : undefined;
+}
+
+function parseSseEvents(responseText: string): unknown[] | undefined {
+	const events: unknown[] = [];
+	for (const frame of responseText.replace(/\r\n/g, "\n").split(/\n\n+/)) {
+		const data = frame
+			.split("\n")
+			.filter((line) => line.startsWith("data:"))
+			.map((line) => line.slice("data:".length).trimStart())
+			.join("\n")
+			.trim();
+		if (!data || data === "[DONE]") continue;
+		try {
+			events.push(JSON.parse(data));
+		} catch {
+			return undefined;
+		}
+	}
+	return events.length > 0 ? events : undefined;
+}
+
+function parseCompactionResponse(responseText: string): ParsedCompactionResponse {
+	try {
+		const responseJson: unknown = JSON.parse(responseText);
+		if (!isCompactResponseEnvelope(responseJson)) {
+			return { ok: false, reason: "malformed-response", responseJson };
+		}
+		if (responseJson.output.length === 0) {
+			return { ok: false, reason: "empty-output", responseJson };
+		}
+		return { ok: true, response: responseJson };
+	} catch {
+		// Remote compaction v2 returns Responses SSE rather than one JSON document.
+	}
+
+	const events = parseSseEvents(responseText);
+	if (!events) return { ok: false, reason: "invalid-json" };
+
+	const failed = events.find((event) => isRecord(event) && event.type === "response.failed");
+	if (failed) {
+		return {
+			ok: false,
+			reason: "upstream-error",
+			errorMessage: extractErrorMessage(failed),
+			responseJson: failed,
+		};
+	}
+
+	const completed = [...events].reverse().find((event) => isRecord(event) && event.type === "response.completed");
+	const finalResponse = isRecord(completed) && isRecord(completed.response) ? completed.response : undefined;
+	const doneItems = events
+		.filter((event) => isRecord(event) && event.type === "response.output_item.done" && isRecord(event.item))
+		.map((event) => (event as Record<string, unknown>).item);
+	const addedItems = events
+		.filter((event) => isRecord(event) && event.type === "response.output_item.added" && isRecord(event.item))
+		.map((event) => (event as Record<string, unknown>).item);
+	const output = doneItems.length > 0
+		? doneItems
+		: addedItems.length > 0
+			? addedItems
+			: finalResponse?.output;
+	if (!Array.isArray(output) || !output.every(isCompactOutputItem)) {
+		return { ok: false, reason: "malformed-response", responseJson: finalResponse ?? events };
+	}
+	if (output.length === 0) {
+		return { ok: false, reason: "empty-output", responseJson: finalResponse ?? events };
+	}
+
+	return {
+		ok: true,
+		response: {
+			...(finalResponse ?? {}),
+			output,
+		},
+	};
 }
 
 function extractResponseOutputText(responseJson: unknown): string | undefined {
@@ -201,11 +323,15 @@ export async function executeNativeCompaction(args: {
 	try {
 		for (let attempt = 0; ; attempt++) {
 			try {
-				const response = await undiciFetch(config.compactUrl, {
+				const response = await undiciFetch(buildResponsesUrl(config.compactUrl), {
 					dispatcher,
 					method: "POST",
-					headers: createJsonRequestHeaders(config),
-					body: JSON.stringify(request),
+					headers: createRemoteCompactionHeaders(config),
+					body: JSON.stringify({
+						...request,
+						input: [...request.input, { type: "compaction_trigger" }],
+						stream: true,
+					}),
 					signal,
 				});
 
@@ -235,37 +361,19 @@ export async function executeNativeCompaction(args: {
 					};
 				}
 
-				let responseJson: unknown;
-				try {
-					responseJson = JSON.parse(responseText);
-				} catch (error) {
+				const parsed = parseCompactionResponse(responseText);
+				if (!parsed.ok) {
 					return {
 						ok: false,
-						reason: "invalid-json",
+						reason: parsed.reason,
 						status: response.status,
-						errorMessage: error instanceof Error ? error.message : String(error),
+						errorMessage: parsed.errorMessage,
 						responseText,
+						responseJson: parsed.responseJson,
 					};
 				}
 
-				if (!isCompactResponseEnvelope(responseJson)) {
-					return {
-						ok: false,
-						reason: "malformed-response",
-						status: response.status,
-						responseJson,
-					};
-				}
-
-				if (responseJson.output.length === 0) {
-					return {
-						ok: false,
-						reason: "empty-output",
-						status: response.status,
-						responseJson,
-					};
-				}
-
+				const responseJson = parsed.response;
 				return {
 					ok: true,
 					status: response.status,

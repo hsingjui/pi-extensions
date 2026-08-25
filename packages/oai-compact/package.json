@@ -12,7 +12,10 @@
     "README.md"
   ],
   "scripts": {
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "test:api": "node scripts/test-compact-api.ts",
+    "test:prefix-cache": "node scripts/test-full-prefix-cache.ts"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "catalog:",

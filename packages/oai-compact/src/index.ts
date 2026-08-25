@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-	buildSessionContext,
 	type BeforeProviderRequestEvent,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -16,15 +15,9 @@ import handoffExtension, {
 } from "pi-handoff";
 import { executeNativeCompaction } from "./compact-client.js";
 import { resolveLatestNativeCompactionEntry } from "./details-store.js";
-import {
-	rewriteResponsesPayloadWithNativeReplay,
-	serializeLiveTailToResponsesInput,
-} from "./payload-rewrite.js";
-import {
-	buildCompactUrl,
-	isResponsesCompatiblePayload,
-} from "./runtime.js";
-import { serializeInstructionsToResponsesInput, serializeMessagesToResponsesInput, type NativeCompactionRequestBody } from "./serializer.js";
+import { rewriteResponsesPayloadWithNativeReplay } from "./payload-rewrite.js";
+import { buildCompactUrl, isResponsesCompatiblePayload, type ResponsesCompatibleRequestPayload } from "./runtime.js";
+import type { NativeCompactionRequestBody } from "./serializer.js";
 import { createHandoffCompactionDetails, createHandoffCompactionShimResult, createNativeCompactionDetails, createNativeCompactionShimResult } from "./types.js";
 
 type CompactThresholdFileValue =
@@ -35,7 +28,6 @@ type CompactThresholdFileValue =
 	};
 
 type CompactConfigFile = {
-	model?: string;
 	promptThreshold?: CompactThresholdFileValue;
 	modelPromptThresholds?: Record<string, CompactThresholdFileValue>;
 	// 非 openai-responses API 的压缩策略："off" 取消压缩，"pi" 用 Pi 内置压缩，"handoff" 用 handoff 摘要代替内置压缩
@@ -56,10 +48,8 @@ type CompactPromptThreshold = {
 type CompactConfig = {
 	apiKey?: string;
 	headers?: Record<string, string>;
-	model: string;
 	compactUrl: string;
 	identityUrl: string;
-	modelConfigPath?: string;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -234,8 +224,6 @@ async function handleHandoffCompaction(event: SessionBeforeCompactEvent, ctx: Ex
 async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<CompactConfig | undefined> {
 	if (!ctx.model) return undefined;
 
-	const configFile = loadCompactConfigFile();
-	const model = configFile?.config.model?.trim();
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 	if (!auth.ok) {
 		notify(ctx, `读取当前模型认证失败：${auth.error}，已取消压缩`, "warning");
@@ -249,15 +237,9 @@ async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<
 			(Object.fromEntries(
 				Object.entries(auth.headers).filter(([, value]) => value !== null),
 			) as Record<string, string>),
-		model: model || ctx.model.id,
 		compactUrl: buildCompactUrl(ctx.model.baseUrl),
 		identityUrl: ctx.model.baseUrl,
-		modelConfigPath: model ? configFile?.configPath : undefined,
 	};
-}
-
-function cloneOpaqueWindow(window: readonly unknown[]): unknown[] {
-	return window.map((item) => structuredClone(item));
 }
 
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error") {
@@ -292,6 +274,9 @@ function getPromptThresholdHit(input: {
 
 	return { reached: reasons.length > 0, reasons };
 }
+
+// ponytail: Pi 同一进程只有一个活动 session；记录 sessionId 可避免切会话后复用旧 payload
+let latestNormalPayload: { sessionId: string; payload: ResponsesCompatibleRequestPayload } | undefined;
 
 // ponytail: 模块级防重入标志；压缩在途时忽略相邻 turn_end 或手动触发
 let compactionScheduled = false;
@@ -367,44 +352,18 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 
 	const branchEntries = ctx.sessionManager.getBranch();
 	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries);
-
-	// 与 Pi 正常请求共用同一 prompt_cache_key（Pi 用 sessionId，见 pi-ai openai-responses）,
-	// 这样 compact 请求能命中正常请求写入的缓存；后续 replay 请求保留 Pi payload 自带的同 key，命中 compact 写入的缓存。
-	const promptCacheKey = Array.from(ctx.sessionManager.getSessionId()).slice(0, 64).join("");
-	const systemPromptItem = serializeInstructionsToResponsesInput(ctx.model, ctx.getSystemPrompt());
-
-	let request: NativeCompactionRequestBody;
-	if (latestNativeCompaction.ok) {
-		const liveTailEntries = branchEntries.slice(latestNativeCompaction.index + 1);
-		request = {
-			model: config.model,
-			input: [
-				...systemPromptItem,
-				...cloneOpaqueWindow(latestNativeCompaction.entry.details!.compactedWindow),
-				...serializeLiveTailToResponsesInput({ model: ctx.model, entries: liveTailEntries }),
-			],
-		};
-	} else if (latestNativeCompaction.reason === "no-compaction") {
-		const preparationMessages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];
-		const sessionContextMessages = buildSessionContext(branchEntries, ctx.sessionManager.getLeafId()).messages;
-		const sourceMessages = preparationMessages.length > 0 ? preparationMessages : sessionContextMessages;
-		request = {
-			model: config.model,
-			input: [
-				...systemPromptItem,
-				...serializeMessagesToResponsesInput(ctx.model, sourceMessages),
-			],
-		};
-	} else {
+	if (!latestNativeCompaction.ok && latestNativeCompaction.reason !== "no-compaction") {
 		notify(ctx, "最近一次压缩不是 Native compact，已取消压缩", "warning");
 		return { cancel: true };
 	}
 
-	request.prompt_cache_key = promptCacheKey;
-	// 镜像 Pi：仅在 PI_CACHE_RETENTION=long 时延长缓存保留，compact 写入的窗口缓存可跨会话恢复命中
-	if (process.env.PI_CACHE_RETENTION?.trim() === "long") {
-		request.prompt_cache_retention = "24h";
+	const sessionId = ctx.sessionManager.getSessionId();
+	if (latestNormalPayload?.sessionId !== sessionId) {
+		notify(ctx, "未找到当前会话最近一次完整 Responses payload，已取消压缩", "warning");
+		return { cancel: true };
 	}
+
+	const request: NativeCompactionRequestBody = latestNormalPayload.payload;
 
 	const result = await executeNativeCompaction({
 		config: {
@@ -432,7 +391,7 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 		details: createNativeCompactionDetails({
 			provider: ctx.model.provider,
 			api: ctx.model.api,
-			model: config.model,
+			model: request.model,
 			baseUrl: config.identityUrl,
 			compactedWindow: result.compactedWindow,
 			compactResponseId: result.compactResponseId,
@@ -460,25 +419,29 @@ async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ct
 
 	// Responses API 格式
 	if (isResponsesCompatiblePayload(event.payload)) {
-
 		const branchEntries = ctx.sessionManager.getBranch();
 		const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries);
-		if (!latestNativeCompaction.ok) {
-			return undefined;
+		let outgoingPayload = event.payload;
+
+		if (latestNativeCompaction.ok) {
+			const rewrite = rewriteResponsesPayloadWithNativeReplay({
+				model: ctx.model,
+				payload: event.payload,
+				branchEntries,
+				compactionEntry: latestNativeCompaction.entry,
+			});
+
+			if (rewrite.ok) {
+				outgoingPayload = rewrite.rewrittenPayload;
+			}
 		}
 
-		const rewrite = rewriteResponsesPayloadWithNativeReplay({
-			model: ctx.model,
-			payload: event.payload,
-			branchEntries,
-			compactionEntry: latestNativeCompaction.entry,
-		});
+		latestNormalPayload = {
+			sessionId: ctx.sessionManager.getSessionId(),
+			payload: structuredClone(outgoingPayload),
+		};
 
-		if (!rewrite.ok) {
-			return undefined;
-		}
-
-		return rewrite.rewrittenPayload;
+		return outgoingPayload === event.payload ? undefined : outgoingPayload;
 	}
 
 	return undefined;
