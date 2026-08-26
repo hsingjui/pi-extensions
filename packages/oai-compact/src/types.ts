@@ -2,7 +2,6 @@ import type { CompactionEntry, CompactionResult } from "@earendil-works/pi-codin
 
 export const NATIVE_COMPACTION_STRATEGY = "openai-native-compact-v1";
 export const NATIVE_COMPACTION_SHIM_SUMMARY = "[OpenAI native compaction checkpoint]";
-export const HANDOFF_COMPACTION_STRATEGY = "handoff-summary-v1";
 
 export type NativeCompactionRequestMeta = {
 	tokensBefore?: number;
@@ -148,44 +147,6 @@ export function createNativeCompactionShimResult(input: {
 }): CompactionResult<NativeCompactionDetails> {
 	return {
 		summary: input.summary?.trim() || NATIVE_COMPACTION_SHIM_SUMMARY,
-		firstKeptEntryId: input.firstKeptEntryId,
-		tokensBefore: input.tokensBefore,
-		details: input.details,
-	};
-}
-
-export type HandoffCompactionDetails = {
-	strategy: typeof HANDOFF_COMPACTION_STRATEGY;
-	provider: string;
-	api: string;
-	model: string;
-	createdAt: string;
-};
-
-export function createHandoffCompactionDetails(input: {
-	provider: string;
-	api: string;
-	model: string;
-	createdAt?: string;
-}): HandoffCompactionDetails {
-	return {
-		strategy: HANDOFF_COMPACTION_STRATEGY,
-		provider: input.provider.trim(),
-		api: input.api.trim(),
-		model: input.model.trim(),
-		createdAt: input.createdAt?.trim() || new Date().toISOString(),
-	};
-}
-
-export function createHandoffCompactionShimResult(input: {
-	firstKeptEntryId: string;
-	tokensBefore: number;
-	summary: string;
-	details: HandoffCompactionDetails;
-}): CompactionResult<HandoffCompactionDetails> {
-	const summary = input.summary.trim();
-	return {
-		summary: summary || NATIVE_COMPACTION_SHIM_SUMMARY,
 		firstKeptEntryId: input.firstKeptEntryId,
 		tokensBefore: input.tokensBefore,
 		details: input.details,

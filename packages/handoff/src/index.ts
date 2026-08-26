@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   complete,
   Type,
@@ -8,13 +11,155 @@ import {
 import type {
   ExtensionAPI,
   ExtensionContext,
+  SessionBeforeCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import {
   buildSessionContext,
+  getAgentDir,
   convertToLlm,
 } from "@earendil-works/pi-coding-agent";
 
 const TOOL_NAME = "create_handoff_context";
+
+function isResponsesApi(api: string): boolean {
+  return api === "openai-responses" || api === "openai-responses-ws";
+}
+
+type CompactThresholdFileValue =
+  | number
+  | {
+      percent?: number;
+      tokens?: number;
+    };
+
+type HandoffConfigFile = {
+  promptThreshold?: CompactThresholdFileValue;
+  modelPromptThresholds?: Record<string, CompactThresholdFileValue>;
+  // 非 Responses API 的压缩策略："off" 取消压缩，"pi" 放行 Pi，"handoff" 使用交接摘要
+  nonResponses?: "off" | "pi" | "handoff";
+};
+
+type LoadedHandoffConfigFile = {
+  config: HandoffConfigFile;
+  configPath: string;
+};
+
+type CompactPromptThreshold = {
+  percent?: number;
+  tokens?: number;
+  source: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function loadHandoffConfigFile(): LoadedHandoffConfigFile | undefined {
+  const agentDir = process.env.PI_CODING_AGENT_DIR?.trim();
+  const settingsPath = path.join(getAgentDir(), "settings.json");
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as unknown;
+    if (isRecord(settings) && isRecord(settings.handoff)) {
+      return {
+        config: settings.handoff as HandoffConfigFile,
+        configPath: `${settingsPath}:handoff`,
+      };
+    }
+    if (isRecord(settings) && isRecord(settings.oaiCompact)) {
+      const legacy = settings.oaiCompact;
+      if (legacy.nonResponses === "off" || legacy.nonResponses === "pi" || legacy.nonResponses === "handoff") {
+        return {
+          config: legacy as HandoffConfigFile,
+          configPath: `${settingsPath}:oaiCompact (legacy handoff)`,
+        };
+      }
+    }
+  } catch {
+    // settings.json 不可读时回退旧配置文件
+  }
+
+  const candidatePaths = [
+    agentDir ? path.join(agentDir, "handoff.json") : undefined,
+    path.join(os.homedir(), ".pi", "handoff.json"),
+    agentDir ? path.join(agentDir, "oai-compact.json") : undefined,
+    path.join(os.homedir(), ".pi", "oai-compact.json"),
+  ].filter((value): value is string => Boolean(value));
+
+  for (const configPath of candidatePaths) {
+    try {
+      const parsed = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+      if (isRecord(parsed)) return { config: parsed as HandoffConfigFile, configPath };
+    } catch {
+      continue;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizePositiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function normalizeCompactPromptThreshold(
+  value: CompactThresholdFileValue | undefined,
+  source: string,
+): CompactPromptThreshold | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "number") {
+    const percent = normalizePositiveNumber(value);
+    return percent !== undefined && percent <= 100 ? { percent, source } : undefined;
+  }
+  if (!isRecord(value)) return undefined;
+
+  const percent = normalizePositiveNumber(value.percent);
+  const tokens = normalizePositiveNumber(value.tokens);
+  const threshold: CompactPromptThreshold = { source };
+  if (percent !== undefined && percent <= 100) threshold.percent = percent;
+  if (tokens !== undefined) threshold.tokens = tokens;
+  return threshold.percent !== undefined || threshold.tokens !== undefined ? threshold : undefined;
+}
+
+function globMatches(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`).test(value);
+}
+
+function getPromptThreshold(configFile: LoadedHandoffConfigFile | undefined, ctx: ExtensionContext): CompactPromptThreshold {
+  const modelThresholds = configFile?.config.modelPromptThresholds;
+  if (ctx.model && modelThresholds) {
+    const modelKeys = [`${ctx.model.provider}/${ctx.model.id}`, ctx.model.id];
+    for (const modelKey of modelKeys) {
+      const threshold = normalizeCompactPromptThreshold(
+        modelThresholds[modelKey],
+        `${configFile?.configPath}:modelPromptThresholds.${modelKey}`,
+      );
+      if (threshold) return threshold;
+    }
+    for (const [pattern, value] of Object.entries(modelThresholds)) {
+      if (!pattern.includes("*") || !modelKeys.some((key) => globMatches(pattern, key))) continue;
+      const threshold = normalizeCompactPromptThreshold(
+        value,
+        `${configFile?.configPath}:modelPromptThresholds.${pattern}`,
+      );
+      if (threshold) return threshold;
+    }
+  }
+
+  return normalizeCompactPromptThreshold(
+    configFile?.config.promptThreshold,
+    `${configFile?.configPath}:promptThreshold`,
+  ) ?? { percent: 80, source: "默认（80%）" };
+}
+
+function getNonResponsesMode(configFile: LoadedHandoffConfigFile | undefined): "off" | "pi" | "handoff" {
+  const value = configFile?.config.nonResponses;
+  return value === "pi" || value === "handoff" ? value : "off";
+}
+
+function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error") {
+  if (ctx.hasUI) ctx.ui.notify(message, level);
+}
 
 const handoffTool = {
   name: TOOL_NAME,
@@ -229,6 +374,65 @@ export async function generateHandoffContext(
   return formatHandoffContext(handoff);
 }
 
+function formatPercent(percent: number): string {
+  return `${percent.toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+function formatTokenCount(tokens: number): string {
+  return Math.round(tokens).toLocaleString("en-US");
+}
+
+function getPromptThresholdHit(input: {
+  threshold: CompactPromptThreshold;
+  usage: ReturnType<ExtensionContext["getContextUsage"]>;
+}): { reached: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  const { threshold, usage } = input;
+  if (!usage) return { reached: false, reasons };
+
+  if (threshold.percent !== undefined && usage.percent !== null && usage.percent >= threshold.percent) {
+    reasons.push(`上下文占用 ${formatPercent(usage.percent)} ≥ ${formatPercent(threshold.percent)}`);
+  }
+  if (threshold.tokens !== undefined && usage.tokens !== null && usage.tokens >= threshold.tokens) {
+    reasons.push(`上下文 ${formatTokenCount(usage.tokens)} tokens ≥ ${formatTokenCount(threshold.tokens)} tokens`);
+  }
+  return { reached: reasons.length > 0, reasons };
+}
+
+async function checkAndCompact(pi: ExtensionAPI, ctx: ExtensionContext) {
+  if (
+    !ctx.model ||
+    isResponsesApi(ctx.model.api) ||
+    getNonResponsesMode(loadHandoffConfigFile()) !== "handoff"
+  ) {
+    return;
+  }
+
+  const threshold = getPromptThreshold(loadHandoffConfigFile(), ctx);
+  const hit = getPromptThresholdHit({ threshold, usage: ctx.getContextUsage() });
+  if (!hit.reached) return;
+
+  // 复用 /handoff 命令：自动生成摘要 → 用户确认 → 新开 session 并发送
+  notify(ctx, `上下文已达到 Handoff 阈值（${hit.reasons.join("；")}），自动生成交接摘要…`, "info");
+  pi.sendUserMessage("/handoff", { expandPromptTemplates: true, deliverAs: "followUp" });
+}
+
+function handleSessionBeforeCompact(_event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
+  if (!ctx.model || isResponsesApi(ctx.model.api)) return undefined;
+
+  switch (getNonResponsesMode(loadHandoffConfigFile())) {
+    case "pi":
+      return undefined;
+    case "handoff":
+      // 阈值触发走 /handoff 交接（生成 → 确认 → 新开 session），取消 Pi 内置压缩
+      notify(ctx, "Handoff 模式：Pi 内置压缩已取消，达到阈值时将自动 /handoff", "info");
+      return { cancel: true };
+    default:
+      notify(ctx, "当前供应商的 Pi 内置压缩已禁用", "warning");
+      return { cancel: true };
+  }
+}
+
 // 常驻注册 create_handoff_context 工具：工具定义稳定出现在每个请求的工具列表中，保证提示词缓存命中
 export function registerHandoffTool(pi: ExtensionAPI) {
 	pi.registerTool({
@@ -244,6 +448,9 @@ export function registerHandoffTool(pi: ExtensionAPI) {
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.on("turn_end", (_event, ctx) => checkAndCompact(pi, ctx));
+  pi.on("session_before_compact", handleSessionBeforeCompact);
+  registerHandoffTool(pi);
   pi.registerCommand("handoff", {
     description: "总结当前上下文，确认内容后直接创建新 session 并发送给 agent",
     handler: async (args, ctx) => {
@@ -252,6 +459,8 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // handoff 要接管当前上下文，先停止正在运行的 agent 再等待收尾
+      if (!ctx.isIdle()) ctx.abort();
       await ctx.waitForIdle();
 
       let summary: string | null;

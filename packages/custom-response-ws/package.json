@@ -1,7 +1,7 @@
 {
-  "name": "pi-oai-compact",
+  "name": "pi-custom-response-ws",
   "version": "0.1.0",
-  "description": "A pi extension that replaces OpenAI Responses compaction with native remote compaction.",
+  "description": "OpenAI Responses WebSocket API adapter for Pi",
   "type": "module",
   "main": "./src/index.ts",
   "exports": {
@@ -9,16 +9,15 @@
   },
   "files": [
     "src",
+    "scripts",
     "README.md"
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test test/*.test.ts",
-    "test:api": "node scripts/test-compact-api.ts",
-    "test:prefix-cache": "node scripts/test-full-prefix-cache.ts"
+    "probe-ws": "node ./scripts/probe-ws.mjs",
+    "probe-compaction": "node ./scripts/probe-compaction.mjs"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "catalog:",
     "@earendil-works/pi-ai": "catalog:",
     "@earendil-works/pi-coding-agent": "catalog:",
     "undici": "^7.16.0"
@@ -29,7 +28,7 @@
   },
   "pi": {
     "extensions": [
-      "./extensions/pi-oai-compact.ts"
+      "./extensions/pi-custom-response-ws.ts"
     ]
   }
 }

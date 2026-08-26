@@ -10,6 +10,7 @@ Pi Coding Agent 个人扩展仓库。
 | `packages/handoff` | 任务交接扩展 |
 | `packages/mystatusline` | 自定义状态栏 |
 | `packages/notify` | 任务结束等待输入时的终端系统通知 |
+| `packages/custom-response-ws` | OpenAI Responses WebSocket API 适配器 |
 | `packages/oai-compact` | 压缩优化 |
 | `packages/tool-opt` | 工具优化（图片处理等） |
 

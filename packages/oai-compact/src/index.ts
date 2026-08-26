@@ -7,18 +7,13 @@ import {
 	type ExtensionContext,
 	getAgentDir,
 	type SessionBeforeCompactEvent,
-	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import handoffExtension, {
-	generateHandoffContext,
-	registerHandoffTool,
-} from "pi-handoff";
 import { executeNativeCompaction } from "./compact-client.js";
 import { resolveLatestNativeCompactionEntry } from "./details-store.js";
 import { rewriteResponsesPayloadWithNativeReplay } from "./payload-rewrite.js";
 import { buildCompactUrl, isResponsesCompatiblePayload, type ResponsesCompatibleRequestPayload } from "./runtime.js";
 import type { NativeCompactionRequestBody } from "./serializer.js";
-import { createHandoffCompactionDetails, createHandoffCompactionShimResult, createNativeCompactionDetails, createNativeCompactionShimResult } from "./types.js";
+import { createNativeCompactionDetails, createNativeCompactionShimResult } from "./types.js";
 
 type CompactThresholdFileValue =
 	| number
@@ -30,8 +25,6 @@ type CompactThresholdFileValue =
 type CompactConfigFile = {
 	promptThreshold?: CompactThresholdFileValue;
 	modelPromptThresholds?: Record<string, CompactThresholdFileValue>;
-	// 非 openai-responses API 的压缩策略："off" 取消压缩，"pi" 用 Pi 内置压缩，"handoff" 用 handoff 摘要代替内置压缩
-	nonResponses?: "off" | "pi" | "handoff";
 };
 
 type LoadedCompactConfigFile = {
@@ -163,64 +156,15 @@ function getModelPromptThreshold(
 	);
 }
 
-function getNonResponsesMode(configFile: LoadedCompactConfigFile | undefined): "off" | "pi" | "handoff" {
-	const value = configFile?.config.nonResponses;
-	return value === "pi" || value === "handoff" ? value : "off";
+function getServerCompactThreshold(threshold: CompactPromptThreshold, contextWindow: number): number {
+	const candidates = [
+		threshold.tokens,
+		threshold.percent === undefined ? undefined : (contextWindow * threshold.percent) / 100,
+	].filter((value): value is number => value !== undefined);
+	return Math.floor(Math.min(...candidates));
 }
 
-// 取最近一条用户消息文本作为 handoff 提取的请求上下文
-function extractLatestUserRequest(branchEntries: readonly SessionEntry[]): string {
-	for (let i = branchEntries.length - 1; i >= 0; i--) {
-		const entry = branchEntries[i];
-		if (entry.type !== "message" || entry.message.role !== "user") continue;
-
-		const content = entry.message.content;
-		if (!Array.isArray(content)) continue;
-
-		const text = content
-			.filter((part): part is { type: "text"; text: string } => part.type === "text")
-			.map((part) => part.text)
-			.join("\n")
-			.trim();
-		if (text) return text.slice(0, 2000);
-	}
-	return "";
-}
-
-// 非 openai-responses：用 handoff 提取逻辑生成交接摘要作为压缩内容；生成失败则取消压缩
-async function handleHandoffCompaction(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
-	if (!ctx.model) return { cancel: true };
-
-	const request = extractLatestUserRequest(event.branchEntries);
-	let summary: string | null = null;
-	try {
-		summary = await generateHandoffContext(request, ctx, event.signal);
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		notify(ctx, `Handoff 压缩失败：${message}，已取消压缩`, "warning");
-		return { cancel: true };
-	}
-
-	if (!summary) {
-		notify(ctx, "Handoff 压缩失败，已取消压缩", "warning");
-		return { cancel: true };
-	}
-
-	notify(ctx, "Handoff 压缩成功：已用交接摘要压缩上下文", "info");
-	return {
-		compaction: createHandoffCompactionShimResult({
-			firstKeptEntryId: event.preparation.firstKeptEntryId,
-			tokensBefore: event.preparation.tokensBefore,
-			summary,
-			details: createHandoffCompactionDetails({
-				provider: ctx.model.provider,
-				api: ctx.model.api,
-				model: ctx.model.id,
-			}),
-		}),
-	};
-}
-
+// 非 Responses 的压缩由 pi-handoff 负责；本插件只接管 Responses native compact
 async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<CompactConfig | undefined> {
 	if (!ctx.model) return undefined;
 
@@ -330,15 +274,7 @@ function runCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 
 async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx: ExtensionContext) {
 	if (!ctx.model || ctx.model.api !== "openai-responses") {
-		switch (getNonResponsesMode(loadCompactConfigFile())) {
-			case "pi":
-				// 放行 Pi 内置 compact
-				return undefined;
-			case "handoff":
-				return handleHandoffCompaction(event, ctx);
-			default:
-				return { cancel: true };
-		}
+		return undefined;
 	}
 
 	const config = await resolveCurrentModelCompactConfig(ctx);
@@ -409,50 +345,56 @@ async function handleSessionBeforeCompact(event: SessionBeforeCompactEvent, ctx:
 }
 
 async function handleBeforeProviderRequest(event: BeforeProviderRequestEvent, ctx: ExtensionContext) {
-	if (!ctx.model) {
+	if (!ctx.model || !isResponsesCompatiblePayload(event.payload)) {
 		return undefined;
+	}
+
+	if (ctx.model.api === "openai-responses-ws") {
+		if (event.payload.context_management !== undefined) {
+			return undefined;
+		}
+		const threshold = getModelPromptThreshold(loadCompactConfigFile(), ctx);
+		return {
+			...event.payload,
+			context_management: [
+				{
+					type: "compaction",
+					compact_threshold: getServerCompactThreshold(threshold, ctx.model.contextWindow),
+				},
+			],
+		};
 	}
 
 	if (ctx.model.api !== "openai-responses") {
 		return undefined;
 	}
 
-	// Responses API 格式
-	if (isResponsesCompatiblePayload(event.payload)) {
-		const branchEntries = ctx.sessionManager.getBranch();
-		const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries);
-		let outgoingPayload = event.payload;
+	const branchEntries = ctx.sessionManager.getBranch();
+	const latestNativeCompaction = resolveLatestNativeCompactionEntry(branchEntries);
+	let outgoingPayload = event.payload;
 
-		if (latestNativeCompaction.ok) {
-			const rewrite = rewriteResponsesPayloadWithNativeReplay({
-				model: ctx.model,
-				payload: event.payload,
-				branchEntries,
-				compactionEntry: latestNativeCompaction.entry,
-			});
+	if (latestNativeCompaction.ok) {
+		const rewrite = rewriteResponsesPayloadWithNativeReplay({
+			model: ctx.model,
+			payload: event.payload,
+			branchEntries,
+			compactionEntry: latestNativeCompaction.entry,
+		});
 
-			if (rewrite.ok) {
-				outgoingPayload = rewrite.rewrittenPayload;
-			}
+		if (rewrite.ok) {
+			outgoingPayload = rewrite.rewrittenPayload;
 		}
-
-		latestNormalPayload = {
-			sessionId: ctx.sessionManager.getSessionId(),
-			payload: structuredClone(outgoingPayload),
-		};
-
-		return outgoingPayload === event.payload ? undefined : outgoingPayload;
 	}
 
-	return undefined;
+	latestNormalPayload = {
+		sessionId: ctx.sessionManager.getSessionId(),
+		payload: structuredClone(outgoingPayload),
+	};
+
+	return outgoingPayload === event.payload ? undefined : outgoingPayload;
 }
 
 export default function (pi: ExtensionAPI) {
-	// 合并 pi-handoff：注册 /handoff 命令（生成交接摘要并新建 session）
-	handoffExtension(pi);
-	// 常驻注册交接工具，稳定工具列表以命中提示词缓存
-	registerHandoffTool(pi);
-
 	// 一次模型响应及其工具结果全部落盘后检查，命中时在下一次模型请求前压缩
 	pi.on("turn_end", (_event, ctx) => checkAndCompact(pi, ctx));
 	pi.on("session_before_compact", handleSessionBeforeCompact);

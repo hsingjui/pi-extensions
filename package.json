@@ -14,6 +14,7 @@
       "packages/handoff/extensions/pi-handoff.ts",
       "packages/mystatusline/extensions/pi-mystatusline.ts",
       "packages/notify/extensions/pi-notify.ts",
+      "packages/custom-response-ws/extensions/pi-custom-response-ws.ts",
       "packages/oai-compact/extensions/pi-oai-compact.ts",
       "packages/session-name/extensions/pi-session-name.ts",
       "packages/tool-opt/extensions/pi-tool-opt.ts"
