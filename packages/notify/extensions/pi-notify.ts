@@ -10,7 +10,7 @@
  *
  * 实现：按平台分发——
  * - WSL：调 powershell.exe 弹 Windows 原生 toast（内置图标，圆形 appLogoOverride）
- * - macOS：osascript `display notification`
+ * - macOS：OSC 9 终端通知协议，由终端 App（ghostty/iTerm2 等）自己弹出
  * - 其他：OSC 9 终端通知协议（\x1b]9;...\x1b\），由终端 App（ghostty/iTerm2 等）自己弹出
  * 无权限配置、无需安装任何东西。
  *
@@ -33,7 +33,6 @@ let isWsl = !!process.env.WSL_DISTRO_NAME;
 try {
 	isWsl ||= process.platform === "linux" && /microsoft/i.test(readFileSync("/proc/version", "utf8"));
 } catch { /* 非 Linux 没有 /proc/version */ }
-const isMac = process.platform === "darwin";
 
 /** 提取 assistant 消息的文本内容（text 块拼接） */
 function assistantText(message: AgentEndEvent["messages"][number] | undefined): string {
@@ -98,16 +97,10 @@ function wslToast(title: string, body: string): void {
 		.unref();
 }
 
-/** 系统通知：WSL→Windows toast，macOS→osascript，其他→OSC 9 终端通知（ghostty/iTerm2 等支持） */
+/** 系统通知：WSL→Windows toast，macOS/其他→OSC 9 终端通知（ghostty/iTerm2 等支持） */
 function sendSystemNotification(title: string, body: string): void {
 	if (isWsl) {
 		wslToast(title, body);
-		return;
-	}
-	if (isMac) {
-		spawn("osascript", ["-e", `display notification "${body.replace(/"/g, '\\"')}" with title "${title.replace(/"/g, '\\"')}"`], { stdio: "ignore" })
-			.on("error", () => {})
-			.unref();
 		return;
 	}
 	if (!process.stdout.isTTY) return; // 非交互终端跳过，避免污染管道输出

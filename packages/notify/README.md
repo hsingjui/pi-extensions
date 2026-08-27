@@ -7,8 +7,7 @@
 | 平台 | 实现 |
 |---|---|
 | **WSL** | 插件内实现：调系统自带 `powershell.exe` 弹 Windows 原生 toast（不依赖任何第三方脚本/模块） |
-| **macOS** | `osascript` `display notification` |
-| **其他终端** | OSC 9 终端通知协议（ghostty / iTerm2 支持；不支持的终端忽略序列，无副作用） |
+| **macOS / 其他终端** | OSC 9 终端通知协议（ghostty / iTerm2 支持；不支持的终端忽略序列，无副作用） |
 
 ## 行为
 
@@ -34,4 +33,4 @@
 ## 备注
 
 - WSL 实现自包含：图标内置在插件包（base64 写入 `%TEMP%` 后以 `file:///` 引用），中文经 `-EncodedCommand`（UTF-16LE base64）传递不乱码，AppId 用 Windows PowerShell 的已注册 AUMID（所有 Windows 自带，保证 toast 不被系统静默丢弃）；仅依赖 Windows 自带的 `powershell.exe`，任何用户安装即用
-- macOS 实现通过 `osascript`，通知显示在系统通知中心
+- macOS 实现走 OSC 9 终端通知协议，不依赖 osascript/AppleScript，由终端 App（ghostty/iTerm2 等）弹出
