@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import type { Model } from "@earendil-works/pi-ai";
+import { compactCachedOpenAIResponsesWebSocket } from "pi-custom-response-ws";
 import {
 	type BeforeProviderRequestEvent,
 	buildSessionContext,
@@ -18,7 +18,6 @@ import { rewriteResponsesPayloadWithNativeReplay } from "./payload-rewrite.js";
 import { buildCompactUrl, isResponsesCompatiblePayload, type ResponsesCompatibleRequestPayload } from "./runtime.js";
 import { serializeMessagesToResponsesInput, type NativeCompactionRequestBody } from "./serializer.js";
 import { createNativeCompactionDetails, createNativeCompactionShimResult } from "./types.js";
-import { compactOpenAIResponsesWebSocket } from "./ws-compact-client.js";
 
 type CompactThresholdFileValue =
 	| number
@@ -174,6 +173,12 @@ function getModelPromptThreshold(
 // 非 Responses 的压缩由 pi-handoff 负责；Responses 的压缩由本插件协调
 async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<CompactConfig | undefined> {
 	if (!ctx.model) return undefined;
+	if (ctx.model.api === "openai-responses-ws") {
+		return {
+			compactUrl: buildCompactUrl(ctx.model.baseUrl),
+			identityUrl: ctx.model.baseUrl,
+		};
+	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 	if (!auth.ok) {
@@ -398,14 +403,13 @@ async function handleSessionBeforeCompact(
 	}
 
 	const sessionId = ctx.sessionManager.getSessionId();
-	let request: NativeCompactionRequestBody;
+	let request: NativeCompactionRequestBody | undefined;
 	if (ctx.model.api === "openai-responses-ws") {
-		const rebuiltRequest = buildSessionCompactionRequest(ctx);
-		if (!rebuiltRequest) {
+		request = buildSessionCompactionRequest(ctx);
+		if (!request) {
 			notify(ctx, "无法从当前会话重建 Responses input，已取消压缩", "warning");
 			return { cancel: true };
 		}
-		request = rebuiltRequest;
 	} else {
 		if (latestNormalPayload?.sessionId !== sessionId) {
 			notify(ctx, "未找到当前会话最近一次完整 Responses payload，已取消压缩", "warning");
@@ -419,12 +423,10 @@ async function handleSessionBeforeCompact(
 
 	if (ctx.model.api === "openai-responses-ws") {
 		try {
-			const result = await compactOpenAIResponsesWebSocket({
-				model: ctx.model as Model<"openai-responses-ws">,
-				request,
+			const result = await compactCachedOpenAIResponsesWebSocket({
 				sessionId,
-				apiKey: config.apiKey,
-				headers: config.headers,
+				baseUrl: ctx.model.baseUrl,
+				request,
 				signal: event.signal,
 			});
 			compactedWindow = result.compactedWindow;
@@ -436,6 +438,7 @@ async function handleSessionBeforeCompact(
 			return { cancel: true };
 		}
 	} else {
+		if (!request) return { cancel: true };
 		const result = await executeNativeCompaction({
 			config: {
 				compactUrl: config.compactUrl,
@@ -466,7 +469,7 @@ async function handleSessionBeforeCompact(
 		details: createNativeCompactionDetails({
 			provider: ctx.model.provider,
 			api: ctx.model.api,
-			model: request.model,
+			model: request?.model ?? ctx.model.id,
 			baseUrl: config.identityUrl,
 			compactedWindow,
 			compactResponseId,

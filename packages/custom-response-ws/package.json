@@ -20,8 +20,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-ai": "catalog:",
-    "@earendil-works/pi-coding-agent": "catalog:",
-    "undici": "^7.16.0"
+    "@earendil-works/pi-coding-agent": "catalog:"
   },
   "devDependencies": {
     "@types/node": "^24.9.1",

@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import os, { homedir } from "node:os";
 import { join } from "node:path";
-import { ProxyAgent, WebSocket } from "undici";
 
 const args = process.argv.slice(2);
 function option(name, fallback) {
@@ -21,7 +20,6 @@ if (args.includes("--help") || args.includes("-h")) {
   --model <id>      模型，默认 provider 的第一个模型
   --config <path>   models.json 路径
   --url <url>       直接指定 baseUrl 或 /responses URL
-  --proxy <url>     HTTP 代理，例如 http://127.0.0.1:7890
   --timeout <ms>    超时，默认 120000
 `);
 	process.exit(0);
@@ -35,7 +33,6 @@ const configPath = option(
 		: join(homedir(), ".pi", "agent", "models.json"),
 );
 const timeoutMs = Number(option("--timeout", "120000"));
-const proxy = option("--proxy", process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY);
 
 function responseUrl(value) {
 	const url = new URL(value);
@@ -55,6 +52,11 @@ async function decode(data) {
 	throw new Error("不支持的 WebSocket 消息类型");
 }
 
+const WebSocketCtor = globalThis.WebSocket;
+if (typeof WebSocketCtor !== "function") {
+	throw new Error("当前 runtime 不提供 WebSocket");
+}
+
 let socket;
 try {
 	const config = args.includes("--url") ? {} : JSON.parse(await readFile(configPath, "utf8"));
@@ -70,8 +72,7 @@ try {
 	console.log(`目标: ${url}`);
 	console.log(`模型: ${model}`);
 
-	socket = new WebSocket(url, {
-		...(proxy ? { dispatcher: new ProxyAgent(proxy) } : {}),
+	socket = new WebSocketCtor(url, {
 		headers: {
 			Authorization: `Bearer ${apiKey}`,
 			"User-Agent": `pi (${os.platform()} ${os.release()}; ${os.arch()})`,

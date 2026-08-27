@@ -1,5 +1,5 @@
 import os from "node:os";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import {
 	stream as streamOpenAIResponses,
@@ -13,7 +13,6 @@ import {
 } from "@earendil-works/pi-ai";
 import { registerApiProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type MessageEvent as UndiciMessageEvent, WebSocket } from "undici";
 
 const API = "openai-responses-ws";
 const PI_USER_AGENT = `pi (${os.platform()} ${os.release()}; ${os.arch()})`;
@@ -26,7 +25,21 @@ const PREVIOUS_RESPONSE_NOT_FOUND = "previous_response_not_found";
 const CONNECTION_LIMIT_REACHED = "websocket_connection_limit_reached";
 const TERMINAL_EVENTS = new Set(["response.completed", "response.incomplete", "response.failed", "error"]);
 
-type Socket = InstanceType<typeof WebSocket>;
+type WebSocketEventType = "open" | "message" | "error" | "close";
+type WebSocketListener = (event: unknown) => void;
+
+interface Socket {
+	readonly readyState?: number;
+	close(code?: number, reason?: string): void;
+	send(data: string): void;
+	addEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
+	removeEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
+}
+
+type WebSocketConstructor = new (
+	url: string,
+	protocols?: string | string[] | { headers?: Record<string, string> },
+) => Socket;
 type RequestBody = Record<string, unknown> & {
 	input?: unknown[];
 	previous_response_id?: string;
@@ -36,6 +49,11 @@ interface ContinuationState {
 	lastRequestBody: RequestBody;
 	lastResponseId: string;
 	lastResponseItems: unknown[];
+	compactionBaseline?: {
+		leadingInput: unknown[];
+		compactedWindow: unknown[];
+		trailingInput: unknown[];
+	};
 }
 
 interface CachedConnection {
@@ -55,6 +73,12 @@ interface AcquiredConnection {
 
 interface TransportConfig {
 	beta: string;
+}
+
+export interface CachedWebSocketCompactionResult {
+	compactedWindow: Record<string, unknown>[];
+	compactResponseId: string;
+	createdAt: string;
 }
 
 const connectionCache = new Map<string, CachedConnection>();
@@ -100,11 +124,20 @@ function errorMessage(value: unknown, fallback: string): string {
 	return fallback;
 }
 
+function getWebSocketConstructor(): WebSocketConstructor {
+	const ctor = (globalThis as { WebSocket?: unknown }).WebSocket;
+	if (typeof ctor !== "function") {
+		throw new Error("WebSocket transport is not available in this runtime");
+	}
+	return ctor as unknown as WebSocketConstructor;
+}
+
 async function connect(url: string, headers: Record<string, string>, signal?: AbortSignal, timeoutMs?: number): Promise<Socket> {
 	if (signal?.aborted) throw new Error("Request was aborted");
 
 	return new Promise<Socket>((resolve, reject) => {
-		const socket = new WebSocket(url, { headers });
+		const WebSocketCtor = getWebSocketConstructor();
+		const socket = new WebSocketCtor(url, { headers });
 		let settled = false;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 
@@ -128,8 +161,8 @@ async function connect(url: string, headers: Record<string, string>, signal?: Ab
 			cleanup();
 			resolve(socket);
 		};
-		const onError = (event: Event) => fail(new Error(errorMessage(event, "WebSocket connection failed")));
-		const onClose = (event: Event) => fail(new Error(errorMessage(event, "WebSocket closed while connecting")));
+		const onError: WebSocketListener = (event) => fail(new Error(errorMessage(event, "WebSocket connection failed")));
+		const onClose: WebSocketListener = (event) => fail(new Error(errorMessage(event, "WebSocket closed while connecting")));
 		const onAbort = () => fail(new Error("Request was aborted"));
 
 		socket.addEventListener("open", onOpen);
@@ -148,18 +181,15 @@ async function connect(url: string, headers: Record<string, string>, signal?: Ab
 }
 
 function isOpen(socket: Socket): boolean {
-	return socket.readyState === WebSocket.OPEN;
+	return socket.readyState === undefined || socket.readyState === 1;
 }
 
 function isExpired(entry: CachedConnection): boolean {
 	return Date.now() - entry.createdAt >= MAX_CONNECTION_AGE_MS;
 }
 
-function connectionKey(sessionId: string, url: string, headers: Record<string, string>): string {
-	const headerFingerprint = createHash("sha256")
-		.update(JSON.stringify(Object.entries(headers).sort(([a], [b]) => a.localeCompare(b))))
-		.digest("hex");
-	return `${sessionId}\n${url}\n${headerFingerprint}`;
+function connectionKey(sessionId: string, url: string): string {
+	return `${sessionId}\n${url}`;
 }
 
 async function acquireConnection(
@@ -169,7 +199,7 @@ async function acquireConnection(
 	signal: AbortSignal | undefined,
 	timeoutMs: number | undefined,
 ): Promise<AcquiredConnection> {
-	const key = sessionId ? connectionKey(sessionId, url, headers) : undefined;
+	const key = sessionId ? connectionKey(sessionId, url) : undefined;
 	const cached = key ? connectionCache.get(key) : undefined;
 
 	if (cached && cached.idleTimer) {
@@ -320,6 +350,23 @@ function requestBodyWithoutInput(body: RequestBody): RequestBody {
 	return rest;
 }
 
+function isPromptEnvelopeItem(item: unknown): boolean {
+	if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+	const role = (item as Record<string, unknown>).role;
+	return role === "developer" || role === "system";
+}
+
+function splitPromptEnvelope(input: readonly unknown[]): { leadingInput: unknown[]; trailingInput: unknown[] } {
+	let leadingEnd = 0;
+	while (leadingEnd < input.length && isPromptEnvelopeItem(input[leadingEnd])) leadingEnd++;
+	let trailingStart = input.length;
+	while (trailingStart > leadingEnd && isPromptEnvelopeItem(input[trailingStart - 1])) trailingStart--;
+	return {
+		leadingInput: input.slice(0, leadingEnd),
+		trailingInput: input.slice(trailingStart),
+	};
+}
+
 function getInputDelta(body: RequestBody, continuation: ContinuationState): unknown[] | undefined {
 	if (!isDeepStrictEqual(requestBodyWithoutInput(body), requestBodyWithoutInput(continuation.lastRequestBody))) {
 		return undefined;
@@ -332,6 +379,20 @@ function getInputDelta(body: RequestBody, continuation: ContinuationState): unkn
 		(item) => !item || typeof item !== "object" || (item as Record<string, unknown>).type !== "compaction_trigger",
 	);
 	const baseline = [...previousInput, ...replayedResponseItems];
+	if (continuation.compactionBaseline) {
+		const { leadingInput, compactedWindow, trailingInput } = continuation.compactionBaseline;
+		const prefix = [...leadingInput, ...compactedWindow];
+		if (input.length < prefix.length + trailingInput.length) return undefined;
+		if (!isDeepStrictEqual(input.slice(0, prefix.length), prefix)) return undefined;
+		if (
+			trailingInput.length > 0 &&
+			!isDeepStrictEqual(input.slice(input.length - trailingInput.length), trailingInput)
+		) {
+			return undefined;
+		}
+		const deltaEnd = trailingInput.length > 0 ? input.length - trailingInput.length : input.length;
+		return input.slice(prefix.length, deltaEnd);
+	}
 	if (input.length < baseline.length || !isDeepStrictEqual(input.slice(0, baseline.length), baseline)) return undefined;
 	return input.slice(baseline.length);
 }
@@ -422,6 +483,207 @@ async function decodeMessage(data: unknown): Promise<string> {
 	throw new Error("Unsupported WebSocket message type");
 }
 
+function responsesWebSocketUrl(baseUrl: string): string {
+	const url = new URL(baseUrl);
+	url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+	if (!url.pathname.endsWith("/responses")) {
+		url.pathname = `${url.pathname.replace(/\/+$/, "")}/responses`;
+	}
+	if (url.protocol === "https:") url.protocol = "wss:";
+	else if (url.protocol === "http:") url.protocol = "ws:";
+	if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+		throw new Error(`Unsupported WebSocket protocol: ${url.protocol}`);
+	}
+	return url.toString();
+}
+
+function acquireCachedConnectionForCompaction(sessionId: string, url: string): AcquiredConnection {
+	const key = connectionKey(sessionId, url);
+	const cached = connectionCache.get(key);
+	if (!cached) {
+		throw new Error("No cached Responses WebSocket connection is available for compaction");
+	}
+	if (cached.busy) {
+		throw new Error("Cached Responses WebSocket connection is busy");
+	}
+	if (isExpired(cached) || !isOpen(cached.socket)) {
+		closeSocket(cached.socket, 1000, isExpired(cached) ? "connection_age_limit" : "done");
+		connectionCache.delete(key);
+		throw new Error("Cached Responses WebSocket connection is no longer reusable");
+	}
+	if (!cached.continuation) {
+		throw new Error("Cached Responses WebSocket continuation is unavailable for compaction");
+	}
+	if (cached.idleTimer) {
+		clearTimeout(cached.idleTimer);
+		cached.idleTimer = undefined;
+	}
+	cached.busy = true;
+	return {
+		socket: cached.socket,
+		entry: cached,
+		release: createRelease(key, cached),
+	};
+}
+
+function compactionCreatedAt(value: unknown): string {
+	if (typeof value === "number" && Number.isFinite(value)) {
+		return new Date(value > 1_000_000_000_000 ? value : value * 1000).toISOString();
+	}
+	if (typeof value === "string" && value.trim()) {
+		const trimmed = value.trim();
+		const parsed = Date.parse(trimmed);
+		return Number.isNaN(parsed) ? trimmed : new Date(parsed).toISOString();
+	}
+	return new Date().toISOString();
+}
+
+function receiveCachedCompaction(
+	connection: AcquiredConnection,
+	fullBody: RequestBody,
+	signal?: AbortSignal,
+): Promise<CachedWebSocketCompactionResult> {
+	const entry = connection.entry;
+	const continuation = entry?.continuation;
+	if (!entry || !continuation) {
+		return Promise.reject(new Error("Cached Responses WebSocket continuation is unavailable for compaction"));
+	}
+	const delta = getInputDelta(fullBody, continuation);
+	if (!delta) {
+		return Promise.reject(new Error("Current Responses payload does not extend the cached WebSocket continuation"));
+	}
+	const { previous_response_id: _previousResponseId, ...baselineBody } = fullBody;
+	const promptEnvelope = splitPromptEnvelope(fullBody.input ?? []);
+	const requestBody: RequestBody = {
+		...baselineBody,
+		previous_response_id: continuation.lastResponseId,
+		input: [...delta, { type: "compaction_trigger" }],
+	};
+
+	return new Promise((resolve, reject) => {
+		const doneItems: Record<string, unknown>[] = [];
+		let settled = false;
+		let processing = Promise.resolve();
+
+		const cleanup = () => {
+			connection.socket.removeEventListener("message", onMessage);
+			connection.socket.removeEventListener("error", onError);
+			connection.socket.removeEventListener("close", onClose);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const fail = (error: Error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(error);
+		};
+		const complete = (event: Record<string, unknown>) => {
+			const response =
+				event.response && typeof event.response === "object"
+					? (event.response as Record<string, unknown>)
+					: undefined;
+			const responseOutput = Array.isArray(response?.output) ? response.output : [];
+			const output = doneItems.length > 0 ? doneItems : responseOutput;
+			if (
+				!output.every((item): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item))
+			) {
+				throw new Error("Responses WebSocket compaction returned malformed output");
+			}
+			if (!output.some((item) => item.type === "compaction")) {
+				throw new Error("Responses WebSocket compaction returned no compaction item");
+			}
+			const responseId = typeof response?.id === "string" && response.id.trim() ? response.id.trim() : undefined;
+			if (!responseId) {
+				throw new Error("Responses WebSocket compaction returned no response id");
+			}
+			entry.continuation = {
+				lastRequestBody: {
+					...baselineBody,
+					input: [...promptEnvelope.leadingInput, ...output, ...promptEnvelope.trailingInput],
+				},
+				lastResponseId: responseId,
+				lastResponseItems: [],
+				compactionBaseline: {
+					leadingInput: promptEnvelope.leadingInput,
+					compactedWindow: output,
+					trailingInput: promptEnvelope.trailingInput,
+				},
+			};
+			settled = true;
+			cleanup();
+			resolve({
+				compactedWindow: output,
+				compactResponseId: responseId,
+				createdAt: compactionCreatedAt(response?.created_at),
+			});
+		};
+		const onMessage: WebSocketListener = (message) => {
+			processing = processing
+				.then(async () => {
+					if (settled || !message || typeof message !== "object" || !("data" in message)) return;
+					const event = JSON.parse(await decodeMessage((message as { data?: unknown }).data)) as unknown;
+					if (!event || typeof event !== "object" || Array.isArray(event)) {
+						throw new Error("Invalid Responses WebSocket event");
+					}
+					const parsed = event as Record<string, unknown>;
+					if (typeof parsed.type !== "string") throw new Error("Invalid Responses WebSocket event");
+					if (parsed.type === "error" || parsed.type === "response.failed") throw eventError(parsed);
+					if (
+						parsed.type === "response.output_item.done" &&
+						parsed.item &&
+						typeof parsed.item === "object" &&
+						!Array.isArray(parsed.item)
+					) {
+						doneItems.push(parsed.item as Record<string, unknown>);
+					}
+					if (parsed.type === "response.completed" || parsed.type === "response.done") complete(parsed);
+				})
+				.catch((error) => fail(error instanceof Error ? error : new Error(String(error))));
+		};
+		const onError: WebSocketListener = (event) => fail(new Error(errorMessage(event, "WebSocket compaction failed")));
+		const onClose: WebSocketListener = (event) => {
+			processing.then(() => fail(new Error(errorMessage(event, "WebSocket closed before compaction completed"))));
+		};
+		const onAbort = () => fail(new Error("Request was aborted"));
+
+		connection.socket.addEventListener("message", onMessage);
+		connection.socket.addEventListener("error", onError);
+		connection.socket.addEventListener("close", onClose);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		if (signal?.aborted) {
+			onAbort();
+			return;
+		}
+		try {
+			connection.socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
+		} catch (error) {
+			fail(error instanceof Error ? error : new Error(String(error)));
+		}
+	});
+}
+
+export async function compactCachedOpenAIResponsesWebSocket(args: {
+	sessionId: string;
+	baseUrl: string;
+	request: Record<string, unknown> & { input?: unknown[] };
+	signal?: AbortSignal;
+}): Promise<CachedWebSocketCompactionResult> {
+	if (args.signal?.aborted) throw new Error("Request was aborted");
+	const fullBody = normalizeRequestBody({
+		...args.request,
+		input: Array.isArray(args.request.input) ? [...args.request.input] : [],
+	});
+	const connection = acquireCachedConnectionForCompaction(args.sessionId, responsesWebSocketUrl(args.baseUrl));
+	try {
+		const result = await receiveCachedCompaction(connection, fullBody, args.signal);
+		connection.release(true);
+		return result;
+	} catch (error) {
+		connection.release(false);
+		throw error;
+	}
+}
+
 async function createEventStreamResponse(
 	connection: AcquiredConnection,
 	fullBody: RequestBody,
@@ -468,11 +730,12 @@ async function createEventStreamResponse(
 				connection.release(false);
 				if (!responseStarted) rejectFirstResponseEvent?.(error);
 			};
-			const onMessage = (event: UndiciMessageEvent) => {
+			const onMessage: WebSocketListener = (event) => {
 				processing = processing
 					.then(async () => {
 						if (settled) return;
-						const text = await decodeMessage(event.data);
+						if (!event || typeof event !== "object" || !("data" in event)) return;
+						const text = await decodeMessage((event as { data?: unknown }).data);
 						const parsed = JSON.parse(text) as Record<string, unknown>;
 						if (!parsed || typeof parsed.type !== "string") throw new Error("Invalid WebSocket event");
 						let type = parsed.type;
@@ -530,8 +793,8 @@ async function createEventStreamResponse(
 			const failAfterMessages = (error: Error) => {
 				processing = processing.then(() => fail(error));
 			};
-			const onError = (event: Event) => failAfterMessages(new Error(errorMessage(event, "WebSocket error")));
-			const onClose = (event: Event) =>
+			const onError: WebSocketListener = (event) => failAfterMessages(new Error(errorMessage(event, "WebSocket error")));
+			const onClose: WebSocketListener = (event) =>
 				failAfterMessages(new Error(errorMessage(event, "WebSocket closed before completion")));
 			const onAbort = () => fail(new Error("Request was aborted"));
 			cancelStream = onAbort;
