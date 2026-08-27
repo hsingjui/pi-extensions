@@ -45,7 +45,7 @@
 
 `baseUrl` 规则与 `openai-responses` 相同。Pi 内置客户端请求 `${baseUrl}/responses`，扩展会自动转换为 `ws://` 或 `wss://`。
 
-与 `pi-oai-compact` 同时加载时，扩展沿用 `~/.pi/agent/settings.json` 的 `oaiCompact.promptThreshold` 和 `modelPromptThresholds` 配置，通过每次 `response.create` 的 `context_management` 启用服务端压缩，全程不调用 HTTP `/responses/compact`。未配置时阈值仍为模型 `contextWindow` 的 80%。
+`pi-oai-compact` 独立负责 WS native compact：它会从当前 session 重建完整 input，并建立一次性 WS 连接发送 `compaction_trigger`。本扩展只负责普通 Responses 对话传输，两者没有包依赖。
 
 ## 协议
 
@@ -67,11 +67,10 @@ WebSocket 请求头只发送：
   "model": "gpt-5.6-luna",
   "store": false,
   "stream": true,
-  "context_management": [
-    { "type": "compaction", "compact_threshold": 200000 }
-  ],
   "instructions": "...",
-  "input": [],
+  "input": [
+    { "type": "compaction_trigger" }
+  ],
   "text": { "verbosity": "low" },
   "include": ["reasoning.encrypted_content"],
   "tool_choice": "auto",
@@ -89,7 +88,7 @@ Pi 的 transport 设置继续生效：
 - `websocket` / `websocket-cached`：只使用 WebSocket。
 - `sse`：直接使用 Pi 内置 SSE。
 
-连接按 Pi session 复用，空闲 5 分钟回收，并在 55 分钟后主动换连接。`auto` 和 `websocket-cached` 会使用 `previous_response_id`，后续请求只发送新增 input；服务端生成的 `compaction` item 保留在该响应链中，不会被误当作 Pi 的本地 replay input。若服务端返回 `previous_response_not_found`，会自动重连并用完整上下文重试一次。连接上限错误同样重试一次。
+连接按 Pi session 复用，空闲 5 分钟回收，并在 55 分钟后主动换连接。`auto` 和 `websocket-cached` 会使用 `previous_response_id`，后续请求只发送新增 input；若服务端返回 `previous_response_not_found`，会自动重连并用完整上下文重试一次。连接上限错误同样重试一次。`pi-oai-compact` 保存的 `compaction` item 会由后续完整请求 replay，因此不依赖本扩展中单个 WS 连接的生命周期。
 
 扩展复用 Pi 内置 Responses 的消息、工具调用、reasoning、usage 和事件解析，不实现 Codex 专属 OAuth、账号 header、zstd SSE 压缩和 ChatGPT 计费逻辑。
 

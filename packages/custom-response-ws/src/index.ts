@@ -311,7 +311,12 @@ function normalizeRequestBody(body: RequestBody): RequestBody {
 }
 
 function requestBodyWithoutInput(body: RequestBody): RequestBody {
-	const { input: _input, previous_response_id: _previousResponseId, ...rest } = body;
+	const {
+		input: _input,
+		previous_response_id: _previousResponseId,
+		context_management: _contextManagement,
+		...rest
+	} = body;
 	return rest;
 }
 
@@ -323,7 +328,10 @@ function getInputDelta(body: RequestBody, continuation: ContinuationState): unkn
 	const replayedResponseItems = continuation.lastResponseItems.filter(
 		(item) => !item || typeof item !== "object" || (item as Record<string, unknown>).type !== "compaction",
 	);
-	const baseline = [...(continuation.lastRequestBody.input ?? []), ...replayedResponseItems];
+	const previousInput = (continuation.lastRequestBody.input ?? []).filter(
+		(item) => !item || typeof item !== "object" || (item as Record<string, unknown>).type !== "compaction_trigger",
+	);
+	const baseline = [...previousInput, ...replayedResponseItems];
 	if (input.length < baseline.length || !isDeepStrictEqual(input.slice(0, baseline.length), baseline)) return undefined;
 	return input.slice(baseline.length);
 }

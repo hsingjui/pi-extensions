@@ -138,8 +138,8 @@ async function runTurn(socket, payload) {
 				if (message.type === "response.completed" || message.type === "response.done") finish();
 			}).catch(finish);
 		}
-		function onClose() {
-			processing.then(() => finish(new Error("WebSocket 在响应完成前关闭")));
+		function onClose(event) {
+			processing.then(() => finish(new Error(`WebSocket 在响应完成前关闭（code=${event.code}, reason=${event.reason || "无"}）`)));
 		}
 		function onError() {
 			processing.then(() => finish(new Error("WebSocket 响应错误")));
