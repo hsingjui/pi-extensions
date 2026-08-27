@@ -21,7 +21,7 @@
     "@earendil-works/pi-agent-core": "catalog:",
     "@earendil-works/pi-ai": "catalog:",
     "@earendil-works/pi-coding-agent": "catalog:",
-    "undici": "^7.16.0"
+    "pi-custom-response-ws": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^24.9.1",

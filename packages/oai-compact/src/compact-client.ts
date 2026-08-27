@@ -1,6 +1,5 @@
 import os from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
-import { ProxyAgent, fetch as undiciFetch } from "undici";
 import type { NativeCompactionRequestBody } from "./serializer.js";
 
 const CODEX_USER_AGENT = `pi (${os.platform()} ${os.release()}; ${os.arch()})`;
@@ -14,7 +13,6 @@ export type CompactClientConfig = {
 	compactUrl: string;
 	apiKey?: string;
 	headers?: Record<string, string>;
-	proxy?: string;
 };
 
 type CompactResponseEnvelope = {
@@ -133,11 +131,6 @@ function isCompactOutputItem(value: unknown): value is Record<string, unknown> {
 
 function isCompactResponseEnvelope(value: unknown): value is CompactResponseEnvelope {
 	return isRecord(value) && Array.isArray(value.output) && value.output.every(isCompactOutputItem);
-}
-
-function createDispatcher(proxy: string | undefined): ProxyAgent | undefined {
-	const normalized = proxy?.trim();
-	return normalized ? new ProxyAgent(normalized) : undefined;
 }
 
 function hasHeader(headers: Record<string, string> | undefined, name: string): boolean {
@@ -318,13 +311,9 @@ export async function executeNativeCompaction(args: {
 		};
 	}
 
-	const dispatcher = createDispatcher(config.proxy);
-
-	try {
-		for (let attempt = 0; ; attempt++) {
-			try {
-				const response = await undiciFetch(buildResponsesUrl(config.compactUrl), {
-					dispatcher,
+	for (let attempt = 0; ; attempt++) {
+		try {
+			const response = await globalThis.fetch(buildResponsesUrl(config.compactUrl), {
 					method: "POST",
 					headers: createRemoteCompactionHeaders(config),
 					body: JSON.stringify({
@@ -384,27 +373,24 @@ export async function executeNativeCompaction(args: {
 					createdAt: normalizeResponseTimestamp(responseJson.created_at),
 					response: responseJson,
 				};
-			} catch (error) {
-				if (signal?.aborted || isAbortError(error)) {
+		} catch (error) {
+			if (signal?.aborted || isAbortError(error)) {
+				return { ok: false, reason: "aborted" };
+			}
+
+			if (attempt < NATIVE_COMPACTION_MAX_RETRIES) {
+				if (!(await waitBeforeRetry(attempt, signal))) {
 					return { ok: false, reason: "aborted" };
 				}
-
-				if (attempt < NATIVE_COMPACTION_MAX_RETRIES) {
-					if (!(await waitBeforeRetry(attempt, signal))) {
-						return { ok: false, reason: "aborted" };
-					}
-					continue;
-				}
-
-				return {
-					ok: false,
-					reason: "network-error",
-					errorMessage: error instanceof Error ? error.message : String(error),
-				};
+				continue;
 			}
+
+			return {
+				ok: false,
+				reason: "network-error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+			};
 		}
-	} finally {
-		dispatcher?.close();
 	}
 }
 
@@ -423,11 +409,8 @@ export async function executePortableCompactionSummary(args: {
 		};
 	}
 
-	const dispatcher = createDispatcher(config.proxy);
-
 	try {
-		const response = await undiciFetch(buildResponsesUrl(config.compactUrl), {
-			dispatcher,
+		const response = await globalThis.fetch(buildResponsesUrl(config.compactUrl), {
 			method: "POST",
 			headers: createJsonRequestHeaders(config),
 			body: JSON.stringify({
@@ -508,7 +491,5 @@ export async function executePortableCompactionSummary(args: {
 			reason: "network-error",
 			errorMessage: error instanceof Error ? error.message : String(error),
 		};
-	} finally {
-		dispatcher?.close();
 	}
 }

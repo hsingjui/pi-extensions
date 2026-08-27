@@ -52,9 +52,6 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 'catalog:'
         version: 0.84.2(supports-color@7.2.0)(ws@8.21.1)(zod@4.4.3)
-      undici:
-        specifier: ^7.16.0
-        version: 7.29.0
     devDependencies:
       '@types/node':
         specifier: ^24.9.1
@@ -111,9 +108,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: 'catalog:'
         version: 0.84.2(supports-color@7.2.0)(ws@8.21.1)(zod@4.4.3)
-      undici:
-        specifier: ^7.16.0
-        version: 7.29.0
+      pi-custom-response-ws:
+        specifier: workspace:*
+        version: link:../custom-response-ws
     devDependencies:
       '@types/node':
         specifier: ^24.9.1

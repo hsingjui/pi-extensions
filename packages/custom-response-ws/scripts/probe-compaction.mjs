@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { WebSocket } from "undici";
 
 const args = process.argv.slice(2);
 
@@ -74,9 +73,14 @@ function buildPrefix(length) {
 	return seed.repeat(Math.ceil(length / seed.length)).slice(0, length);
 }
 
+const WebSocketCtor = globalThis.WebSocket;
+if (typeof WebSocketCtor !== "function") {
+	throw new Error("当前 runtime 不提供 WebSocket");
+}
+
 async function connect(url, apiKey, sessionId) {
 	return new Promise((resolve, reject) => {
-		const socket = new WebSocket(url, {
+		const socket = new WebSocketCtor(url, {
 			headers: {
 				Authorization: `Bearer ${apiKey}`,
 				"OpenAI-Beta": "responses_websockets=2026-02-06",
