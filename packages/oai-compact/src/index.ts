@@ -173,12 +173,6 @@ function getModelPromptThreshold(
 // 非 Responses 的压缩由 pi-handoff 负责；Responses 的压缩由本插件协调
 async function resolveCurrentModelCompactConfig(ctx: ExtensionContext): Promise<CompactConfig | undefined> {
 	if (!ctx.model) return undefined;
-	if (ctx.model.api === "openai-responses-ws") {
-		return {
-			compactUrl: buildCompactUrl(ctx.model.baseUrl),
-			identityUrl: ctx.model.baseUrl,
-		};
-	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 	if (!auth.ok) {
@@ -301,7 +295,11 @@ function buildSessionCompactionRequest(ctx: ExtensionContext): NativeCompactionR
 	const template = resolveWsRequestTemplate(branchEntries, ctx);
 	const sessionId = Array.from(ctx.sessionManager.getSessionId()).slice(0, 64).join("");
 	let payload: ResponsesCompatibleRequestPayload = {
-		...(template ?? { prompt_cache_key: sessionId }),
+		...(template ?? {}),
+		prompt_cache_key:
+			typeof template?.prompt_cache_key === "string" && template.prompt_cache_key.trim()
+				? template.prompt_cache_key
+				: sessionId,
 		model: ctx.model.id,
 		input: serializeMessagesToResponsesInput(ctx.model, buildSessionContext(branchEntries).messages, {
 			instructions: ctx.getSystemPrompt(),
@@ -427,6 +425,8 @@ async function handleSessionBeforeCompact(
 				sessionId,
 				baseUrl: ctx.model.baseUrl,
 				request,
+				apiKey: config.apiKey,
+				headers: config.headers,
 				signal: event.signal,
 			});
 			compactedWindow = result.compactedWindow;
