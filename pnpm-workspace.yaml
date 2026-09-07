@@ -3,6 +3,7 @@ packages:
 
 allowBuilds:
   '@google/genai': true
+  esbuild: true
   koffi: true
   protobufjs: true
 
@@ -15,4 +16,5 @@ catalog:
 
 # photon-node (tool-opt) 依赖 koffi 需要构建脚本
 onlyBuiltDependencies:
+  - esbuild
   - koffi

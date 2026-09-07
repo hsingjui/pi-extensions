@@ -24,7 +24,7 @@
     "file-type": "^21.1.1"
   },
   "devDependencies": {
-    "@mariozechner/pi-coding-agent": "latest",
+    "@earendil-works/pi-coding-agent": "catalog:",
     "typescript": "^5.9.3"
   }
 }

@@ -4,7 +4,7 @@ import {
   truncateHead,
   type ReadToolDetails,
   type ReadToolInput,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import { constants } from "node:fs";
 import { access as fsAccess, readFile as fsReadFile } from "node:fs/promises";
 import { formatDimensionNote, resizeImage } from "./image-resize.js";

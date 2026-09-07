@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
-	stream as streamOpenAIResponses,
-	streamSimple as streamSimpleOpenAIResponses,
-	type OpenAIResponsesOptions,
-} from "@earendil-works/pi-ai/api/openai-responses";
-import type { Model, StreamOptions } from "@earendil-works/pi-ai";
-import { registerApiProvider } from "@earendil-works/pi-ai/compat";
+	getApiProvider,
+	registerApiProvider,
+	registerBuiltInApiProviders,
+} from "@earendil-works/pi-ai/compat";
+import type { Model, OpenAIResponsesOptions, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { acquireConnection, sseFallbackSessions } from "./connection.js";
 import {
@@ -122,22 +121,35 @@ function createWebSocketFetch(
 
 export default function (_pi: ExtensionAPI): void {
 	const config = { beta: DEFAULT_BETA };
+	// pi 0.85.x 打包运行时的扩展加载器虚拟模块表不再包含 pi-ai 的 api/* 子路径，
+	// 不能直接 import "@earendil-works/pi-ai/api/openai-responses"；
+	// 改从 compat 入口取内置 openai-responses 实现后包一层 WS fetch。
+	registerBuiltInApiProviders();
+	const builtin = getApiProvider("openai-responses");
+	if (!builtin) {
+		throw new Error("built-in openai-responses api provider not registered");
+	}
+	// builtin.stream/streamSimple 的 options 是基类 StreamOptions，这里需要 Responses 专属的 fetch/onPayload 字段
+	const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions> = builtin.stream;
+	const streamSimpleOpenAIResponses = builtin.streamSimple as StreamFunction<"openai-responses", OpenAIResponsesOptions>;
+	// 0.85.x compat 的 getApiProvider 返回 wrapStream 包装版，会校验 model.api === "openai-responses"；
+	// 本插件的 model.api 是 "openai-responses-ws"，直接透传会抛 Mismatched api，改写后再交给内置实现
+	const rewriteApi = (model: Model<typeof API>): Model<"openai-responses"> =>
+		({ ...model, api: "openai-responses" }) as unknown as Model<"openai-responses">;
 	registerApiProvider<typeof API, OpenAIResponsesOptions>({
 		api: API,
 		stream: (model, context, options) => {
-			const responsesModel = model as unknown as Model<"openai-responses">;
-			return streamOpenAIResponses(responsesModel, context, {
+			return streamOpenAIResponses(rewriteApi(model), context, {
 				...options,
 				onPayload: undefined,
-				fetch: createWebSocketFetch(config, model, options),
+				fetch: createWebSocketFetch(config, model, options as StreamOptions | undefined),
 			});
 		},
 		streamSimple: (model, context, options) => {
-			const responsesModel = model as unknown as Model<"openai-responses">;
-			return streamSimpleOpenAIResponses(responsesModel, context, {
+			return streamSimpleOpenAIResponses(rewriteApi(model), context, {
 				...options,
 				onPayload: undefined,
-				fetch: createWebSocketFetch(config, model, options),
+				fetch: createWebSocketFetch(config, model, options as StreamOptions | undefined),
 			});
 		},
 	});

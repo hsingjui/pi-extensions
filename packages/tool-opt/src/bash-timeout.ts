@@ -1,7 +1,7 @@
 import {
 	isToolCallEventType,
 	type ExtensionAPI,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 /** Default bash timeout in seconds when the model omits `timeout`. */
 export const DEFAULT_BASH_TIMEOUT_SECONDS = 30;

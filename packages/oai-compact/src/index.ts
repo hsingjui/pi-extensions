@@ -230,6 +230,8 @@ let latestNormalPayload: { sessionId: string; payload: ResponsesCompatibleReques
 
 // ponytail: 模块级防重入标志；压缩在途时忽略相邻 turn_end 或手动触发
 let compactionScheduled = false;
+// ponytail: 同一进程只允许一个 native compact，避免扩展自动压缩与 Pi auto-compaction 并发发 WS 请求
+let nativeCompactionInFlight = false;
 let pendingManualWsResumeSessionId: string | undefined;
 
 function createWsRequestTemplate(payload: ResponsesCompatibleRequestPayload): Record<string, unknown> {
@@ -353,24 +355,33 @@ function runCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 	}
 	compactionScheduled = true;
 
-	ctx.compact({
-		onComplete: (result) => {
-			compactionScheduled = false;
-			notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
-			pi.sendUserMessage("continue", { deliverAs: "followUp" });
-		},
-		onError: (error) => {
-			compactionScheduled = false;
-			if (
-				error.message.includes("Already compacted") ||
-				error.message.includes("Nothing to compact") ||
-				error.message.includes("Compaction cancelled")
-			) {
-				return;
-			}
-			notify(ctx, `压缩失败：${error.message}`, "error");
-		},
-	});
+	const startWhenIdle = () => {
+		if (!ctx.isIdle()) {
+			setTimeout(startWhenIdle, 50);
+			return;
+		}
+
+		ctx.compact({
+			onComplete: (result) => {
+				compactionScheduled = false;
+				notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
+				pi.sendUserMessage("continue", { deliverAs: "followUp" });
+			},
+			onError: (error) => {
+				compactionScheduled = false;
+				if (
+					error.message.includes("Already compacted") ||
+					error.message.includes("Nothing to compact") ||
+					error.message.includes("Compaction cancelled")
+				) {
+					return;
+				}
+				notify(ctx, `压缩失败：${error.message}`, "error");
+			},
+		});
+	};
+
+	startWhenIdle();
 }
 
 async function handleSessionBeforeCompact(
@@ -419,8 +430,13 @@ async function handleSessionBeforeCompact(
 	let compactResponseId: string | undefined;
 	let createdAt: string | undefined;
 
-	if (ctx.model.api === "openai-responses-ws") {
-		try {
+	if (nativeCompactionInFlight) {
+		return { cancel: true };
+	}
+	nativeCompactionInFlight = true;
+
+	try {
+		if (ctx.model.api === "openai-responses-ws") {
 			const result = await compactCachedOpenAIResponsesWebSocket({
 				sessionId,
 				baseUrl: ctx.model.baseUrl,
@@ -432,35 +448,38 @@ async function handleSessionBeforeCompact(
 			compactedWindow = result.compactedWindow;
 			compactResponseId = result.compactResponseId;
 			createdAt = result.createdAt;
-		} catch (error) {
-			if (event.signal.aborted) return { cancel: true };
-			notify(ctx, `WS native compact 失败：${error instanceof Error ? error.message : String(error)}`, "warning");
-			return { cancel: true };
-		}
-	} else {
-		if (!request) return { cancel: true };
-		const result = await executeNativeCompaction({
-			config: {
-				compactUrl: config.compactUrl,
-				apiKey: config.apiKey,
-				headers: config.headers,
-			},
-			request,
-			signal: event.signal,
-		});
+		} else {
+			if (!request) return { cancel: true };
+			const result = await executeNativeCompaction({
+				config: {
+					compactUrl: config.compactUrl,
+					apiKey: config.apiKey,
+					headers: config.headers,
+				},
+				request,
+				signal: event.signal,
+			});
 
-		if (!result.ok) {
-			if (result.reason === "aborted") {
+			if (!result.ok) {
+				if (result.reason === "aborted") {
+					return { cancel: true };
+				}
+
+				const detail = result.errorMessage ? `：${result.errorMessage}` : "";
+				notify(ctx, `Native compact 失败：${result.reason}${detail}，已取消压缩`, "warning");
 				return { cancel: true };
 			}
-
-			const detail = result.errorMessage ? `：${result.errorMessage}` : "";
-			notify(ctx, `Native compact 失败：${result.reason}${detail}，已取消压缩`, "warning");
-			return { cancel: true };
+			compactedWindow = result.compactedWindow;
+			compactResponseId = result.compactResponseId;
+			createdAt = result.createdAt;
 		}
-		compactedWindow = result.compactedWindow;
-		compactResponseId = result.compactResponseId;
-		createdAt = result.createdAt;
+	} catch (error) {
+		if (event.signal.aborted) return { cancel: true };
+		const prefix = ctx.model.api === "openai-responses-ws" ? "WS native compact" : "Native compact";
+		notify(ctx, `${prefix} 失败：${error instanceof Error ? error.message : String(error)}`, "warning");
+		return { cancel: true };
+	} finally {
+		nativeCompactionInFlight = false;
 	}
 
 	const compaction = createNativeCompactionShimResult({
