@@ -18,3 +18,7 @@ catalog:
 onlyBuiltDependencies:
   - esbuild
   - koffi
+
+# pi 包跟随 latest，发布当天即安装；其余依赖仍保留 24h 供应链检查
+minimumReleaseAgeExclude:
+  - '@earendil-works/*'
