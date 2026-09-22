@@ -355,33 +355,25 @@ function runCompaction(pi: ExtensionAPI, ctx: ExtensionContext) {
 	}
 	compactionScheduled = true;
 
-	const startWhenIdle = () => {
-		if (!ctx.isIdle()) {
-			setTimeout(startWhenIdle, 50);
-			return;
-		}
-
-		ctx.compact({
-			onComplete: (result) => {
-				compactionScheduled = false;
-				notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
-				pi.sendUserMessage("continue", { deliverAs: "followUp" });
-			},
-			onError: (error) => {
-				compactionScheduled = false;
-				if (
-					error.message.includes("Already compacted") ||
-					error.message.includes("Nothing to compact") ||
-					error.message.includes("Compaction cancelled")
-				) {
-					return;
-				}
-				notify(ctx, `压缩失败：${error.message}`, "error");
-			},
-		});
-	};
-
-	startWhenIdle();
+	// Pi 0.85.x 的 ctx.compact() 会先中止当前 agent；不能等 isIdle，否则 turn_end 后会继续下一次 SSE 请求。
+	ctx.compact({
+		onComplete: (result) => {
+			compactionScheduled = false;
+			notify(ctx, `压缩完成：压缩前 ${formatTokenCount(result.tokensBefore)} tokens`, "info");
+			pi.sendUserMessage("continue", { deliverAs: "followUp" });
+		},
+		onError: (error) => {
+			compactionScheduled = false;
+			if (
+				error.message.includes("Already compacted") ||
+				error.message.includes("Nothing to compact") ||
+				error.message.includes("Compaction cancelled")
+			) {
+				return;
+			}
+			notify(ctx, `压缩失败：${error.message}`, "error");
+		},
+	});
 }
 
 async function handleSessionBeforeCompact(
