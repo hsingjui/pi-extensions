@@ -1,0 +1,26 @@
+{
+  "name": "pi-cache-keepalive",
+  "version": "0.1.0",
+  "description": "Keep Pi prompt caches warm while a session is idle",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@10",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "cache"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/pi-cache-keepalive.ts"
+    ]
+  },
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "catalog:",
+    "typescript": "^5.9.3"
+  }
+}

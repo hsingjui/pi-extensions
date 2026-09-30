@@ -11,6 +11,7 @@
   "pi": {
     "extensions": [
       "packages/cc-ui/extensions/pi-cc-ui.ts",
+      "packages/cache-keepalive/extensions/pi-cache-keepalive.ts",
       "packages/handoff/extensions/pi-handoff.ts",
       "packages/mystatusline/extensions/pi-mystatusline.ts",
       "packages/notify/extensions/pi-notify.ts",

@@ -7,6 +7,7 @@ Pi Coding Agent 个人扩展仓库。
 | 包 | 说明 |
 |---|---|
 | `packages/cc-ui` | TUI 界面增强（含 12 个精选 themes：6 dark + 6 light） |
+| `packages/cache-keepalive` | 空闲会话保持模型提示缓存 |
 | `packages/handoff` | 任务交接扩展 |
 | `packages/mystatusline` | 自定义状态栏 |
 | `packages/notify` | 任务结束等待输入时的终端系统通知 |
@@ -32,6 +33,22 @@ pnpm check          # 全部子包类型检查
 ```
 
 新增扩展：把目录放进 `packages/`，确保有 `extensions/<name>.ts` 入口，然后在根 `package.json` 的 `pi.extensions` 里加一行。
+
+缓存保持配置写入 `~/.pi/agent/settings.json`：
+
+```json
+{
+  "cacheWarming": "idle",
+  "cacheKeepAlive": {
+    "models": {
+      "anthropic/claude-sonnet-4-5": 3600,
+      "openai/gpt-4o": 300
+    }
+  }
+}
+```
+
+`models` 的值为缓存秒数；未列出的模型不保持。删除 `models` 可对所有支持提示缓存的模型启用；`force` 默认开启，设置为 `false` 时沿用 Pi 的成本判断。
 
 ## 致谢与声明
 
