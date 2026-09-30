@@ -35,8 +35,10 @@ let pendingUserText: string | undefined; // 首条用户消息失败后暂存，
 let retryPending = false; // 初始命名失败，等待下一条 assistant 回复触发重试
 
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error") {
-	if (ctx.hasUI) {
-		ctx.ui.notify(message, level);
+	try {
+		if (ctx.hasUI) ctx.ui.notify(message, level);
+	} catch {
+		// 会话已结束/替换时 ctx 已 stale，命名通知属尽力而为，忽略
 	}
 }
 
@@ -260,6 +262,11 @@ export function sanitizeTitle(raw: string): string {
 	return title;
 }
 
+/** pi 0.99+ 在会话结束/替换/reload 后作废扩展 ctx，之后调 pi.* 或读 ctx.* 都会抛此错。 */
+function isStaleCtxError(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("stale after session replacement");
+}
+
 /** 执行一次命名；成功设名并清理待重试状态，失败则登记待重试。 */
 async function attemptName(pi: ExtensionAPI, ctx: ExtensionContext, messages: { role: "user" | "assistant"; text: string }[]) {
 	if (naming || !ctx.model) return;
@@ -272,6 +279,12 @@ async function attemptName(pi: ExtensionAPI, ctx: ExtensionContext, messages: { 
 		pi.setSessionName(title);
 	} catch (error) {
 		if (error instanceof Error && error.name === "AbortError") return;
+		// 会话已结束/替换：命名无意义，也不再重试或通知
+		if (isStaleCtxError(error)) {
+			retryPending = false;
+			pendingUserText = undefined;
+			return;
+		}
 		// 失败：若首条用户消息尚未登记过，则登记待重试上下文
 		if (!retryPending && messages.every((m) => m.role === "user")) {
 			pendingUserText = messages[0]?.text;
