@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { convertToLlm } from "@earendil-works/pi-coding-agent";
+import { getSystemMessageText, renderSystemMessageUpdate } from "@earendil-works/pi-ai";
 import type {
 	Api,
 	AssistantMessage,
@@ -138,7 +139,23 @@ export function serializeMessagesToResponsesInput<TApi extends Api>(
 	}
 
 	let messageIndex = 0;
-	for (const message of transformedMessages) {
+	for (const [sourceIndex, message] of transformedMessages.entries()) {
+		if (message.role === "system") {
+			// Pi carries the leading system prompt out-of-band; later system messages are
+			// prompt updates that must survive replay in place.
+			const isLeadingSystemMessage = sourceIndex === 0;
+			if (!(isLeadingSystemMessage && options.includeInstructionsInInput && options.instructions)) {
+				const text = isLeadingSystemMessage ? getSystemMessageText(message) : renderSystemMessageUpdate(message);
+				if (text.length > 0) {
+					input.push({
+						role: model.reasoning ? "developer" : "system",
+						content: sanitizeSurrogates(text),
+					});
+				}
+			}
+			continue;
+		}
+
 		if (message.role === "user") {
 			const item = serializeUserMessage(message, model);
 			if (item) {
