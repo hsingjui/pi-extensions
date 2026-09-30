@@ -265,6 +265,12 @@ function transformMessagesForResponses(messages: Message[]): Message[] {
 		}
 
 		if (message.role === "toolResult") {
+			// Old/custom histories can contain a tool result without its call ID.
+			// Drop it so convertToLlm's synthetic result can satisfy the pending call.
+			if (typeof message.toolCallId !== "string" || message.toolCallId.length === 0) {
+				continue;
+			}
+
 			existingToolResultIds.add(message.toolCallId);
 			transformed.push(message);
 			continue;
