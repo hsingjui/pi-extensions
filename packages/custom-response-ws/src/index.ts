@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
 	getApiProvider,
 	registerApiProvider,
 	registerBuiltInApiProviders,
 } from "@earendil-works/pi-ai/compat";
 import type { Model, OpenAIResponsesOptions, StreamFunction, StreamOptions } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { acquireConnection, sseFallbackSessions } from "./connection.js";
 import {
 	API,
@@ -25,6 +27,20 @@ import {
 } from "./request.js";
 import { createEventStreamResponse } from "./stream.js";
 import type { AcquiredConnection, RequestBody, TransportConfig } from "./types.js";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function loadFastMode(): boolean {
+	try {
+		const settings = JSON.parse(readFileSync(path.join(getAgentDir(), "settings.json"), "utf8")) as unknown;
+		return isRecord(settings) && isRecord(settings.customResponseWs) && settings.customResponseWs.fast === true;
+	} catch {
+		// 配置不可读或无效时默认关闭 Fast，避免意外增加费用。
+		return false;
+	}
+}
 
 function createWebSocketFetch(
 	config: TransportConfig,
@@ -47,6 +63,7 @@ function createWebSocketFetch(
 			}
 			fullBody = replacement as RequestBody;
 		}
+		if (config.fast) fullBody.service_tier = "priority";
 		const fallbackInit = fallbackRequest(init, fullBody);
 		const sessionFallback =
 			transport === "auto" && options?.sessionId !== undefined && sseFallbackSessions.has(options.sessionId);
@@ -120,7 +137,7 @@ function createWebSocketFetch(
 }
 
 export default function (_pi: ExtensionAPI): void {
-	const config = { beta: DEFAULT_BETA };
+	const config: TransportConfig = { beta: DEFAULT_BETA, fast: loadFastMode() };
 	// pi 0.85.x 打包运行时的扩展加载器虚拟模块表不再包含 pi-ai 的 api/* 子路径，
 	// 不能直接 import "@earendil-works/pi-ai/api/openai-responses"；
 	// 改从 compat 入口取内置 openai-responses 实现后包一层 WS fetch。

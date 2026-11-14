@@ -41,6 +41,7 @@ export interface AcquiredConnection {
 
 export interface TransportConfig {
 	beta: string;
+	fast: boolean;
 }
 
 export interface CachedWebSocketCompactionResult {

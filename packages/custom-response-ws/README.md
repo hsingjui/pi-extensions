@@ -45,6 +45,24 @@
 
 `baseUrl` 规则与 `openai-responses` 相同。Pi 内置客户端请求 `${baseUrl}/responses`，扩展会自动转换为 `ws://` 或 `wss://`。
 
+### Fast 模式
+
+在 `~/.pi/agent/settings.json` 中加入（设置了 `PI_CODING_AGENT_DIR` 时使用该目录）：
+
+```json
+{
+  "customResponseWs": {
+    "fast": true
+  }
+}
+```
+
+默认关闭，只有布尔值 `true` 才启用。配置在扩展加载时读取，修改后需执行 `/reload` 或重启 Pi。
+
+开启后，本扩展的所有普通对话请求会在其他扩展修改 payload 后设置 `service_tier: "priority"`（Fast / Priority 优先处理），包括 WebSocket、直接 SSE 和 SSE 回退；不会降低 reasoning effort。设为 `false` 或删除配置后，本扩展不再覆盖请求的 `service_tier`，上游项目默认设置和其他扩展仍可能启用优先处理。
+
+模型、账号或中转服务需要支持该参数，优先处理通常费用更高。此配置不直接应用于独立的 native compact 请求。
+
 `pi-oai-compact` 独立负责 WS native compact：它会从当前 session 重建完整 input，并建立一次性 WS 连接发送 `compaction_trigger`。本扩展只负责普通 Responses 对话传输，两者没有包依赖。
 
 ## 协议
