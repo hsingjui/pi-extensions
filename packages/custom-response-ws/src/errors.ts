@@ -1,3 +1,5 @@
+import { PREVIOUS_RESPONSE_NOT_FOUND } from "./constants.js";
+
 export class WebSocketApiError extends Error {
 	readonly code?: string;
 
@@ -30,6 +32,9 @@ export function eventError(event: Record<string, unknown>): WebSocketApiError {
 			? event.message
 			: typeof nested?.message === "string"
 				? nested.message
-				: code || "Responses WebSocket API error";
-	return new WebSocketApiError(message, code);
+				: typeof source === "string"
+					? source
+					: code || "Responses WebSocket API error";
+	const missingContinuation = message === "Previous response was not found. Retrying the full request.";
+	return new WebSocketApiError(message, code ?? (missingContinuation ? PREVIOUS_RESPONSE_NOT_FOUND : undefined));
 }

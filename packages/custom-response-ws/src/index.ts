@@ -64,7 +64,6 @@ function createWebSocketFetch(
 			fullBody = replacement as RequestBody;
 		}
 		if (config.fast) fullBody.service_tier = "priority";
-		const fallbackInit = fallbackRequest(init, fullBody);
 		const sessionFallback =
 			transport === "auto" && options?.sessionId !== undefined && sseFallbackSessions.has(options.sessionId);
 		if (transport === "sse" || sessionFallback) {
@@ -73,7 +72,7 @@ function createWebSocketFetch(
 					reason: transport === "sse" ? "configured" : "session_fallback",
 				});
 			}
-			return fallbackFetch(input, fallbackInit);
+			return fallbackFetch(input, fallbackRequest(init, fullBody));
 		}
 
 		const useCachedContext = transport === "auto" || transport === "websocket-cached";
@@ -93,7 +92,9 @@ function createWebSocketFetch(
 				);
 				if (!useCachedContext && connection.entry) connection.entry.continuation = undefined;
 				const requestBody =
-					useCachedContext && connection.entry ? buildCachedRequestBody(connection.entry, fullBody) : fullBody;
+					useCachedContext && !retriedMissingContinuation && connection.entry
+						? buildCachedRequestBody(connection.entry, fullBody)
+						: fullBody;
 				const response = await createEventStreamResponse(connection, fullBody, requestBody, useCachedContext, signal);
 				if (options?.sessionId) sseFallbackSessions.delete(options.sessionId);
 				return response;
@@ -114,6 +115,8 @@ function createWebSocketFetch(
 					!retriedMissingContinuation
 				) {
 					retriedMissingContinuation = true;
+					const { previous_response_id: _previousResponseId, ...retryBody } = fullBody;
+					fullBody = retryBody;
 					continue;
 				}
 				if (
@@ -130,7 +133,7 @@ function createWebSocketFetch(
 					continue;
 				}
 				if (options?.sessionId) sseFallbackSessions.add(options.sessionId);
-				return fallbackFetch(input, fallbackInit);
+				return fallbackFetch(input, fallbackRequest(init, fullBody));
 			}
 		}
 	};

@@ -4,6 +4,9 @@ import { errorMessage, eventError } from "./errors.js";
 import { normalizeResponseItem } from "./request.js";
 import type { AcquiredConnection, RequestBody, WebSocketListener } from "./types.js";
 
+const MAX_PRELUDE_FRAMES = 4;
+const MAX_PRELUDE_BYTES = 128 * 1024;
+
 export async function createEventStreamResponse(
 	connection: AcquiredConnection,
 	fullBody: RequestBody,
@@ -26,6 +29,8 @@ export async function createEventStreamResponse(
 		start(controller) {
 			let settled = false;
 			let processing = Promise.resolve();
+			const prelude: Uint8Array[] = [];
+			let preludeBytes = 0;
 
 			const cleanup = () => {
 				connection.socket.removeEventListener("message", onMessage);
@@ -71,7 +76,8 @@ export async function createEventStreamResponse(
 						}
 						if (
 							error &&
-							(error.code === PREVIOUS_RESPONSE_NOT_FOUND || error.code === CONNECTION_LIMIT_REACHED) &&
+							(error.code === CONNECTION_LIMIT_REACHED ||
+								(error.code === PREVIOUS_RESPONSE_NOT_FOUND && requestBody.previous_response_id)) &&
 							!responseStarted
 						) {
 							fail(error);
@@ -91,8 +97,28 @@ export async function createEventStreamResponse(
 							responseItems.push(...responseOutput.map(normalizeResponseItem));
 						}
 
-						controller.enqueue(encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`));
-						if (!responseStarted && (type.startsWith("response.") || type === "error")) {
+						const frame = encoder.encode(`data: ${JSON.stringify(parsed)}\n\n`);
+						// 前导帧没有实际输出，不让它们阻断续传失败后的全量重发。
+						if (
+							!responseStarted &&
+							requestBody.previous_response_id &&
+							(type === "response.metadata" ||
+								type === "codex.response.metadata" ||
+								type === "response.created" ||
+								type === "response.in_progress") &&
+							(responseOutput === undefined || (Array.isArray(responseOutput) && responseOutput.length === 0)) &&
+							prelude.length < MAX_PRELUDE_FRAMES &&
+							preludeBytes + frame.byteLength <= MAX_PRELUDE_BYTES
+						) {
+							prelude.push(frame);
+							preludeBytes += frame.byteLength;
+							return;
+						}
+
+						for (const buffered of prelude) controller.enqueue(buffered);
+						controller.enqueue(frame);
+						if (!responseStarted && (prelude.length > 0 || type.startsWith("response.") || type === "error")) {
+							prelude.length = 0;
 							responseStarted = true;
 							resolveFirstResponseEvent?.();
 						}
