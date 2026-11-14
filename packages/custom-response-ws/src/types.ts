@@ -48,4 +48,5 @@ export interface CachedWebSocketCompactionResult {
 	compactedWindow: Record<string, unknown>[];
 	compactResponseId: string;
 	createdAt: string;
+	usage?: Record<string, unknown>;
 }

@@ -422,6 +422,7 @@ async function handleSessionBeforeCompact(
 	let compactedWindow: unknown[];
 	let compactResponseId: string | undefined;
 	let createdAt: string | undefined;
+	let usage: Record<string, unknown> | undefined;
 
 	if (nativeCompactionInFlight) {
 		return { cancel: true };
@@ -441,6 +442,7 @@ async function handleSessionBeforeCompact(
 			compactedWindow = result.compactedWindow;
 			compactResponseId = result.compactResponseId;
 			createdAt = result.createdAt;
+			usage = result.usage;
 		} else {
 			if (!request) return { cancel: true };
 			const result = await executeNativeCompaction({
@@ -465,6 +467,7 @@ async function handleSessionBeforeCompact(
 			compactedWindow = result.compactedWindow;
 			compactResponseId = result.compactResponseId;
 			createdAt = result.createdAt;
+			usage = isRecord(result.response.usage) ? result.response.usage : undefined;
 		}
 	} catch (error) {
 		if (event.signal.aborted) return { cancel: true };
@@ -486,6 +489,7 @@ async function handleSessionBeforeCompact(
 			compactedWindow,
 			compactResponseId,
 			createdAt,
+			usage,
 			requestMeta: {
 				tokensBefore: event.preparation.tokensBefore,
 				previousSummaryPresent: Boolean(event.preparation.previousSummary),

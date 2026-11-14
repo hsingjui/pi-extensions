@@ -33,6 +33,7 @@
 - `openai-responses` 和 `openai-responses-ws`：监听每个 `turn_end`，达到阈值后自动触发 native compact。
 - `openai-responses-ws` 由本插件从当前 session 重建完整 input，恢复最近一次普通 WS 请求的非 input 字段（包括原始 `instructions` 和 `prompt_cache_key`），再建立独立 WS 连接发送 `compaction_trigger`；避免 agent 中止后运行时提示词丢失导致缓存前缀变化，不依赖旧对话连接仍然存活。
 - `session_before_compact` 返回正式 extension compaction result，由 Pi 写入本地 `compaction` entry、显示原生成功 UI并重建上下文。
+- 服务端返回的原始压缩 `usage` 保存到 `compaction.details.usage`（包括 `input_tokens_details.cached_tokens`）；未返回时不记录，不影响旧会话恢复。
 - 后续 Responses 请求统一改写为 native compact window 加压缩后的增量历史，支持断线、重启和 session 恢复。
 - 自动压缩完成后发送一次 `continue`；手动 WS `/compact` 在正式 `session_compact` 后同样续接一次。
 - native compact 失败、认证不可用或被中止时取消本次压缩，不回退 Pi 默认 compact。

@@ -94,6 +94,10 @@ function receiveCompaction(
 				compactedWindow: output,
 				compactResponseId: responseId,
 				createdAt: compactionCreatedAt(response?.created_at),
+				usage:
+					response?.usage && typeof response.usage === "object" && !Array.isArray(response.usage)
+						? (response.usage as Record<string, unknown>)
+						: undefined,
 			});
 		};
 		const onMessage: WebSocketListener = (message) => {

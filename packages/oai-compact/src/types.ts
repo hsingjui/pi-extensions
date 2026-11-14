@@ -19,6 +19,7 @@ export type NativeCompactionDetails = {
 	portableSummary?: boolean;
 	portableSummaryResponseId?: string;
 	createdAt: string;
+	usage?: Record<string, unknown>;
 	requestMeta?: NativeCompactionRequestMeta;
 };
 
@@ -94,6 +95,7 @@ export function isNativeCompactionDetails(value: unknown): value is NativeCompac
 		value.compactedWindow.every(isCompactedWindowItem) &&
 		isNonEmptyString(value.createdAt) &&
 		(value.compactResponseId === undefined || isNonEmptyString(value.compactResponseId)) &&
+		(value.usage === undefined || (isRecord(value.usage) && isStructuredValue(value.usage))) &&
 		(value.portableSummary === undefined || typeof value.portableSummary === "boolean") &&
 		(value.portableSummaryResponseId === undefined || isNonEmptyString(value.portableSummaryResponseId))
 	);
@@ -113,6 +115,7 @@ export function createNativeCompactionDetails(input: {
 	portableSummary?: boolean;
 	portableSummaryResponseId?: string;
 	createdAt?: string;
+	usage?: Record<string, unknown>;
 	requestMeta?: NativeCompactionRequestMeta;
 }): NativeCompactionDetails {
 	return {
@@ -128,6 +131,7 @@ export function createNativeCompactionDetails(input: {
 			? input.portableSummaryResponseId.trim()
 			: undefined,
 		createdAt: isNonEmptyString(input.createdAt) ? input.createdAt.trim() : new Date().toISOString(),
+		usage: input.usage ? (cloneStructuredValue(input.usage) as Record<string, unknown>) : undefined,
 		requestMeta: input.requestMeta
 			? {
 				...(input.requestMeta.tokensBefore !== undefined ? { tokensBefore: input.requestMeta.tokensBefore } : {}),
