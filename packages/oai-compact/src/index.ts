@@ -304,7 +304,8 @@ function buildSessionCompactionRequest(ctx: ExtensionContext): NativeCompactionR
 				: sessionId,
 		model: ctx.model.id,
 		input: serializeMessagesToResponsesInput(ctx.model, buildSessionContext(branchEntries).messages, {
-			instructions: ctx.getSystemPrompt(),
+			// compact 中止 agent 后提示词可能回退到基础版本，沿用实际请求以保持缓存前缀。
+			instructions: typeof template?.instructions === "string" ? template.instructions : ctx.getSystemPrompt(),
 			includeInstructionsInInput: true,
 		}),
 	};

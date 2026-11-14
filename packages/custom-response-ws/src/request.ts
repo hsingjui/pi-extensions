@@ -77,13 +77,21 @@ export async function parseRequestBody(
 
 export function normalizeRequestBody(body: RequestBody): RequestBody {
 	const input = Array.isArray(body.input) ? [...body.input] : [];
+	// 系统提示保持在 input 数组里，不抽到 instructions 字段。部分中转站（如 cprs）
+	// 不把 instructions 纳入 prompt cache 前缀，抽走会让这部分 token 永远不命中缓存。
 	const first = input[0] as { role?: unknown; content?: unknown } | undefined;
-	const hasInstructions =
+	if (
 		first !== undefined &&
 		(first.role === "developer" || first.role === "system") &&
-		typeof first.content === "string";
-	const instructions = hasInstructions ? (first.content as string) : "You are a helpful assistant.";
-	if (hasInstructions) input.shift();
+		typeof first.content === "string"
+	) {
+		// 简化形式 { role, content: string } 转成标准 message 项，原位保留。
+		input[0] = {
+			type: "message",
+			role: first.role,
+			content: [{ type: "input_text", text: first.content }],
+		};
+	}
 
 	const reasoning = body.reasoning as { effort?: unknown; summary?: unknown } | undefined;
 	if (reasoning?.effort === "none" && reasoning.summary === undefined) delete body.reasoning;
@@ -101,11 +109,22 @@ export function normalizeRequestBody(body: RequestBody): RequestBody {
 	delete body.prompt_cache_retention;
 	delete body.prompt_cache_options;
 	delete body.background;
+	// 顶层 instructions 同样不被部分中转站纳入缓存前缀，统一挪进 input 数组。
+	const topInstructions = typeof body.instructions === "string" ? body.instructions : undefined;
+	if (topInstructions !== undefined) {
+		delete body.instructions;
+		if (topInstructions.trim()) {
+			input.unshift({
+				type: "message",
+				role: "developer",
+				content: [{ type: "input_text", text: topInstructions }],
+			});
+		}
+	}
 	return {
 		...body,
 		store: false,
 		stream: true,
-		instructions,
 		input,
 		...(tools === undefined ? {} : { tools }),
 		text: { verbosity: "low", ...(body.text as Record<string, unknown> | undefined) },
